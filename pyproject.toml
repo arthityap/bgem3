@@ -8,7 +8,8 @@ dependencies = [
     "fastapi>=0.135.3",
     "psutil>=7.2.2",
     "ruff>=0.15.10",
-    "sentence-transformers>=5.4.1",
+    "FlagEmbedding>=1.2.12",
+    "anyio>=4.0",
     "uvicorn>=0.44.0",
 ]
 

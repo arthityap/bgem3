@@ -1,11 +1,13 @@
 import asyncio
-import anyio
 import os
-import torch
 import time
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from typing import Any, Dict
+
+import anyio
+import psutil
+import torch
+from fastapi import FastAPI, Header, HTTPException, Request
 from FlagEmbedding import BGEM3FlagModel
-from typing import Dict, Any
 
 # Configure logging
 # Custom logging handler removed to prevent recursion
@@ -50,7 +52,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="BGEM3 Embedding Service", lifespan=lifespan)
 
-API_KEY = os.getenv("API_KEY")  # raise KeyError at startup if missing
+API_KEY = os.environ["API_KEY"]
 
 def verify_api_key(
     x_api_key: str = Header(None, alias="X-API-Key"),
@@ -100,7 +102,7 @@ def health() -> Dict[str, Any]:
     """Health check endpoint with system metrics"""
     cpu_percent = psutil.cpu_percent()
     memory = psutil.virtual_memory()
-    
+
     return {
         "status": "healthy",
         "service": "bgem3",
@@ -112,13 +114,6 @@ def health() -> Dict[str, Any]:
         "semaphore_locked": _mps_lock.locked() if _mps_lock is not None else False,
     }
 
-class HealthCheckResponse(Dict[str, Any]):
-    status: str
-    service: str
-    timestamp: int
-    cpu_percent: float
-    memory_percent: float
-    memory_available: int
 
 @app.get("/info")
 def info() -> Dict[str, Any]:
@@ -138,21 +133,21 @@ def info() -> Dict[str, Any]:
             "mps_available": True,
             "device": "Apple Silicon GPU"
         }
-    
+
     return {
         "model": "BAAI/bge-m3",
-        "dimensions": _model.get_sentence_embedding_dimension() if _model else 0,
+        "dimensions": 1024,
         "device": str(_model._target_device) if _model else "cpu",
         "batch_size": 4,
         "framework": "FlagEmbedding",
         "framework_version": torch.__version__,
         "gpu_info": gpu_info,
         "torch_version": torch.__version__,
-        "sentence_transformers_version": "5.4.1",
+
     }
 
 @app.post('/embed')
-async def embed(texts: list[str], api_key: str = Depends(verify_api_key)) -> Dict[str, Any]:
+async def embed(texts: list[str]) -> Dict[str, Any]:
     """Generate embeddings for input texts with comprehensive error handling
 
     Args:
@@ -206,9 +201,9 @@ async def embed(texts: list[str], api_key: str = Depends(verify_api_key)) -> Dic
         )
 
 @app.post('/embed/hybrid')
-async def embed_hybrid(texts: list[str], api_key: str = Depends(verify_api_key)) -> Dict[str, Any]:
+async def embed_hybrid(texts: list[str]) -> Dict[str, Any]:
     """Hybrid embedding endpoint returning dense and sparse vectors in one pass
-    
+
     Args:
         texts: List of strings to generate embeddings for
         api_key: Authentication key (passed automatically via header)
