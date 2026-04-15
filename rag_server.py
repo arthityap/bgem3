@@ -1,12 +1,11 @@
 import asyncio
-import os
 import time
 from typing import Any, Dict
 
 import anyio
 import psutil
 import torch
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from FlagEmbedding import BGEM3FlagModel
 
 # Configure logging
@@ -52,42 +51,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="BGEM3 Embedding Service", lifespan=lifespan)
 
-API_KEY = os.environ["API_KEY"]
 
-def verify_api_key(
-    x_api_key: str = Header(None, alias="X-API-Key"),
-    api_key: str = None,
-) -> str:
-    """Verify API key from either header or parameter
-
-    Args:
-        x_api_key: API key from X-API-Key header
-        api_key: API key from query parameter or request body
-
-    Returns:
-        Validated API key
-
-    Raises:
-        HTTPException: 401 for unauthorized access
-
-    Tags:
-        - authentication
-        - security
-    """
-    key = api_key or x_api_key
-
-    if not key:
-        raise HTTPException(
-            status_code=401,
-            detail="API Key is required in X-API-Key header or api_key parameter",
-        )
-
-    if key != API_KEY:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid API Key",
-        )
-    return key
 
 @app.middleware("http")
 async def add_process_time_header(request: Request, call_next):
