@@ -1,84 +1,91 @@
+import asyncio
+import anyio
 import os
-
-import logging
-import sys
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from sentence_transformers import SentenceTransformer
-from typing import Dict, Any
 import torch
 import time
-import psutil
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from FlagEmbedding import BGEM3FlagModel
+from typing import Dict, Any
 
 # Configure logging
 # Custom logging handler removed to prevent recursion
 # Was causing maximum recursion depth exceeded error
 
+# Module-level semaphore and model variable
+_mps_lock: asyncio.Semaphore
+_model: BGEM3FlagModel = None
 
-app = FastAPI(title="BGEM3 Embedding Service", version="1.0.0")
+async def lifespan(app: FastAPI):
+    global _mps_lock, _model
+    _mps_lock = asyncio.Semaphore(1)
+    try:
+        _model = BGEM3FlagModel(
+            "BAAI/bge-m3",
+            use_fp16=True,
+            device="mps"
+        )
+        # torch.compile with aot_eager backend (NOT inductor — crashes on MPS)
+        try:
+            import torch
+            _model.model = torch.compile(_model.model, backend="aot_eager")
+        except Exception as e:
+            print(f"torch.compile skipped: {e}")
+        # Warmup with 2 texts at real batch_size to exercise compiled path
+        _model.encode(
+            ["warmup text one", "warmup text two"],
+            batch_size=2,
+            return_dense=True,
+            return_sparse=False,
+            return_colbert_vecs=False,
+        )
+        print("BGE-M3 ready on MPS")
+    except Exception as e:
+        print(f"Failed to initialize model: {e}")
+        raise
+    yield
+    # Cleanup
+    if _model is not None:
+        del _model
+        torch.mps.empty_cache()
 
-# Initialize model with error handling
-try:
-    print("Initializing BAAI/bge-m3 model on MPS device...")
-    model = SentenceTransformer('BAAI/bge-m3', device='mps')
-    print(f"Model initialized successfully on {model._target_device}")
-except Exception as e:
-    print(f"Failed to initialize model: {str(e)}", file=sys.stderr)
-    raise
+app = FastAPI(title="BGEM3 Embedding Service", lifespan=lifespan)
 
-API_KEY = os.getenv('API_KEY', 'm1macmini')
+API_KEY = os.getenv("API_KEY")  # raise KeyError at startup if missing
 
 def verify_api_key(
-    x_api_key: str = Header(None, alias="X-API-Key"), 
-    api_key: str = None
+    x_api_key: str = Header(None, alias="X-API-Key"),
+    api_key: str = None,
 ) -> str:
     """Verify API key from either header or parameter
-    
+
     Args:
         x_api_key: API key from X-API-Key header
         api_key: API key from query parameter or request body
-        
+
     Returns:
         Validated API key
-        
+
     Raises:
         HTTPException: 401 for unauthorized access
-        
+
     Tags:
         - authentication
         - security
     """
     key = api_key or x_api_key
-    
+
     if not key:
         raise HTTPException(
-            status_code=401, 
-            detail="API Key is required in X-API-Key header or api_key parameter"
+            status_code=401,
+            detail="API Key is required in X-API-Key header or api_key parameter",
         )
-        
+
     if key != API_KEY:
         raise HTTPException(
-            status_code=401, 
-            detail="Invalid API Key"
+            status_code=401,
+            detail="Invalid API Key",
         )
     return key
-
-@app.on_event("startup")
-async def warmup():
-    try:
-        print("Warming up model...")
-        model.encode(["warmup"], batch_size=1)
-        print("✅ Server warmed up")
-        print(f"Model device: {model._target_device}")
-        print(f"Model embedding dimension: {model.get_sentence_embedding_dimension()}")
-        
-        # Log startup metrics
-        cpu_percent = psutil.cpu_percent()
-        memory = psutil.virtual_memory()
-        print(f"Startup metrics - CPU: {cpu_percent}%, Memory: {memory.percent}%")
-        
-    except Exception as e:
-        print(f"Failed to warm up model: {str(e)}", file=sys.stderr)
-        raise
 
 @app.middleware("http")
 async def add_process_time_header(request: Request, call_next):
@@ -95,12 +102,14 @@ def health() -> Dict[str, Any]:
     memory = psutil.virtual_memory()
     
     return {
-        "status": "healthy", 
+        "status": "healthy",
         "service": "bgem3",
         "timestamp": int(time.time()),
         "cpu_percent": cpu_percent,
         "memory_percent": memory.percent,
-        "memory_available": memory.available
+        "memory_available": memory.available,
+        "mps_available": torch.backends.mps.is_available(),
+        "semaphore_locked": _mps_lock.locked() if _mps_lock is not None else False,
     }
 
 class HealthCheckResponse(Dict[str, Any]):
@@ -122,9 +131,9 @@ def info() -> Dict[str, Any]:
             "current_device": torch.cuda.current_device(),
             "device_name": torch.cuda.get_device_name(),
             "memory_allocated": torch.cuda.memory_allocated(),
-            "memory_reserved": torch.cuda.memory_reserved()
+            "memory_reserved": torch.cuda.memory_reserved(),
         }
-    elif str(model._target_device) == "mps":
+    elif _model is not None and str(_model._target_device) == "mps":
         gpu_info = {
             "mps_available": True,
             "device": "Apple Silicon GPU"
@@ -132,76 +141,109 @@ def info() -> Dict[str, Any]:
     
     return {
         "model": "BAAI/bge-m3",
-        "dimensions": model.get_sentence_embedding_dimension(),
-        "device": str(model._target_device),
+        "dimensions": _model.get_sentence_embedding_dimension() if _model else 0,
+        "device": str(_model._target_device) if _model else "cpu",
         "batch_size": 4,
-        "framework": "sentence-transformers",
+        "framework": "FlagEmbedding",
         "framework_version": torch.__version__,
         "gpu_info": gpu_info,
         "torch_version": torch.__version__,
-        "sentence_transformers_version": "5.4.1"
+        "sentence_transformers_version": "5.4.1",
     }
 
-class InfoResponse(Dict[str, Any]):
-    model: str
-    dimensions: int
-    device: str
-    batch_size: int
-    framework: str
-    framework_version: str
-    gpu_info: Dict[str, Any]
-    torch_version: str
-    sentence_transformers_version: str
-
 @app.post('/embed')
-def embed(texts: list[str], api_key: str = Depends(verify_api_key)) -> Dict[str, Any]:
+async def embed(texts: list[str], api_key: str = Depends(verify_api_key)) -> Dict[str, Any]:
     """Generate embeddings for input texts with comprehensive error handling
-    
+
     Args:
         texts: List of strings to generate embeddings for
         api_key: Authentication key (passed automatically via header)
-        
+
     Returns:
         Dictionary containing embeddings and metadata
-        
+
     Raises:
         HTTPException: 422 for validation errors, 500 for server errors
-        
+
     Tags:
         - embeddings
         - inference
         - bge-m3
     """
-    try:
-        if not texts:
-            raise HTTPException(
-                status_code=422, 
-                detail="Text list cannot be empty"
-            )
-        
-        if len(texts) > 100:
-            raise HTTPException(
-                status_code=429, 
-                detail="Too many texts in single request. Maximum is 100 texts."
-            )
-            
-        # Log request size for monitoring
-        print(f"Processing {len(texts)} texts")
-        
-        # Generate embeddings
-        embeddings = model.encode(texts, batch_size=4).tolist()
-        
-        return {
-            "embeddings": embeddings,
-            "count": len(embeddings),
-            "dimensions": len(embeddings[0]) if embeddings else 0,
-            "model": "BAAI/bge-m3",
-            "success": True
-        }
-        
-    except Exception as e:
-        print(f"Error generating embeddings: {str(e)}")
+    if not texts:
         raise HTTPException(
-            status_code=500, 
-            detail=f"Failed to generate embeddings: {str(e)}"
+            status_code=422,
+            detail="Text list cannot be empty",
+        )
+
+    if len(texts) > 32:
+        raise HTTPException(
+            status_code=429,
+            detail="max 32 texts per request on M1 16GB",
+        )
+
+    try:
+        async with _mps_lock:
+            result = await anyio.to_thread.run_sync(
+                lambda: _model.encode(
+                    texts,
+                    batch_size=8,
+                    return_dense=True,
+                    return_sparse=False,
+                    return_colbert_vecs=False,
+                )
+            )
+        return {
+            "embeddings": result["dense_vecs"].tolist(),
+            "count": len(texts),
+            "dimensions": 1024,
+            "model": "BAAI/bge-m3",
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate embeddings: {str(e)}",
+        )
+
+@app.post('/embed/hybrid')
+async def embed_hybrid(texts: list[str], api_key: str = Depends(verify_api_key)) -> Dict[str, Any]:
+    """Hybrid embedding endpoint returning dense and sparse vectors in one pass
+    
+    Args:
+        texts: List of strings to generate embeddings for
+        api_key: Authentication key (passed automatically via header)
+
+    Returns:
+        Dictionary containing dense and sparse embeddings
+
+    Raises:
+        HTTPException: 422 for validation errors, 429 for request size limits
+    """
+    if len(texts) > 8:
+        raise HTTPException(
+            status_code=429,
+            detail="max 8 texts for hybrid on M1 16GB",
+        )
+
+    try:
+        async with _mps_lock:
+            result = await anyio.to_thread.run_sync(
+                lambda: _model.encode(
+                    texts,
+                    batch_size=4,
+                    return_dense=True,
+                    return_sparse=True,
+                    return_colbert_vecs=False,
+                )
+            )
+        sparse = [{str(k): float(v) for k, v in vec.items()} for vec in result["lexical_weights"]]
+        return {
+            "dense_embeddings": result["dense_vecs"].tolist(),
+            "sparse_embeddings": sparse,
+            "model": "BAAI/bge-m3",
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate embeddings: {str(e)}",
         )
