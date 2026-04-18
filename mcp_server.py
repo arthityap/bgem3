@@ -5,6 +5,8 @@ mcp = FastMCP("BGEM3Embedder")
 
 BGEM3_URL = "http://10.230.57.109:8000"
 API_KEY = "m1macmini"
+ZT_IP = "10.230.57.109"
+MCP_PORT = 8001
 
 
 @mcp.tool()
@@ -52,4 +54,4 @@ async def embed_hybrid(texts: list[str]) -> dict:
 
 
 if __name__ == "__main__":
-    mcp.run()
+    mcp.run(transport="streamable-http", host=ZT_IP, port=MCP_PORT)
