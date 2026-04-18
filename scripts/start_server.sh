@@ -1,5 +1,5 @@
 #!/bin/zsh
-LOG_DIR="$HOME/Library/Logs/bgem3"
+LOG_DIR="$(dirname "$0")/../logs"
 mkdir -p "$LOG_DIR"
 cd "$(dirname "$0")/.."
 ZT_IP=$(./scripts/get_zt_ip.sh)
