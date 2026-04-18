@@ -144,7 +144,6 @@ dependencies = [
     { name = "flagembedding" },
     { name = "psutil" },
     { name = "ruff" },
-    { name = "transformers" },
     { name = "uvicorn" },
 ]
 
@@ -155,7 +154,6 @@ requires-dist = [
     { name = "flagembedding", specifier = ">=1.2.12" },
     { name = "psutil", specifier = ">=7.2.2" },
     { name = "ruff", specifier = ">=0.15.10" },
-    { name = "transformers", specifier = "<5.0" },
     { name = "uvicorn", specifier = ">=0.44.0" },
 ]
 
