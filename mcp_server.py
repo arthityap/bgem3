@@ -1,12 +1,16 @@
+import os
+
 import httpx
 from fastmcp import FastMCP
 
 mcp = FastMCP("BGEM3Embedder")
 
 BGEM3_URL = "http://10.230.57.109:8000"
-API_KEY = "m1macmini"
-ZT_IP = "10.230.57.109"
-MCP_PORT = 8001
+# API key must match EMBEDDING_API_KEY set in rag_server's .env.
+# Read from env so it's not hardcoded; falls back to 'm1macmini' for local dev.
+API_KEY   = os.getenv("EMBEDDING_API_KEY", "m1macmini")
+ZT_IP     = "10.230.57.109"
+MCP_PORT  = 8001
 
 
 @mcp.tool()
@@ -22,7 +26,8 @@ async def embed(texts: list[str]) -> list[list[float]]:
     async with httpx.AsyncClient() as client:
         r = await client.post(
             f"{BGEM3_URL}/embed",
-            headers={"X-API-Key": API_KEY},
+            # Authorization: Bearer — must match rag_server.py EMBEDDING_API_KEY
+            headers={"Authorization": f"Bearer {API_KEY}"},
             json=texts,
             timeout=30.0,
         )
@@ -45,7 +50,8 @@ async def embed_hybrid(texts: list[str]) -> dict:
     async with httpx.AsyncClient() as client:
         r = await client.post(
             f"{BGEM3_URL}/embed/hybrid",
-            headers={"X-API-Key": API_KEY},
+            # Authorization: Bearer — must match rag_server.py EMBEDDING_API_KEY
+            headers={"Authorization": f"Bearer {API_KEY}"},
             json=texts,
             timeout=30.0,
         )
