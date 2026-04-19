@@ -189,8 +189,8 @@ Run `uv run python preflight.py` to verify:
 
 3. **Check logs**:
    ```bash
-   tail -50 logs/rag_server.log
-   tail -50 logs/mcp_server.log
+   tail -50 logs/bgem3_embed.log
+   tail -50 logs/bgem3_mcp.log
    ```
 
 ### Health Check
