@@ -3,14 +3,23 @@ import os
 import httpx
 from fastmcp import FastMCP
 
-mcp = FastMCP("BGEM3")
+# stateless_http=True: no session state stored between requests.
+# This prevents the server from hanging waiting for a session that never
+# completes, which caused the "screen stuck" symptom on tool calls.
+mcp = FastMCP("BGEM3", stateless_http=True)
 
-BGEM3_URL = "http://10.230.57.109:8000"
+BGEM3_URL  = "http://10.230.57.109:8000"
 RERANK_URL = "http://10.230.57.109:8002"
-# API key must match EMBEDDING_API_KEY in .env — shared by all three services.
-API_KEY = os.getenv("EMBEDDING_API_KEY", "m1macmini")
-ZT_IP = "10.230.57.109"
-MCP_PORT = 8001
+API_KEY    = os.getenv("EMBEDDING_API_KEY", "m1macmini")
+ZT_IP      = "10.230.57.109"
+MCP_PORT   = 8001
+
+# Shared timeouts — connect fast, allow enough time for model inference.
+# connect: fail quickly if service is down
+# read:    allow full model inference time
+_EMBED_TIMEOUT  = httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0)
+_HYBRID_TIMEOUT = httpx.Timeout(connect=5.0, read=45.0, write=5.0, pool=5.0)
+_RERANK_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=5.0, pool=5.0)
 
 
 @mcp.tool()
@@ -22,16 +31,23 @@ async def embed(texts: list[str]) -> list[list[float]]:
 
     Returns:
         List of 1024-dimensional float vectors, one per input text.
+
+    Raises:
+        ValueError: if bgem3_embed service returns an error.
     """
-    async with httpx.AsyncClient() as client:
-        r = await client.post(
-            f"{BGEM3_URL}/embed",
-            headers={"Authorization": f"Bearer {API_KEY}"},
-            json=texts,
-            timeout=30.0,
-        )
-        r.raise_for_status()
-        return r.json()["embeddings"]
+    async with httpx.AsyncClient(timeout=_EMBED_TIMEOUT) as client:
+        try:
+            r = await client.post(
+                f"{BGEM3_URL}/embed",
+                headers={"Authorization": f"Bearer {API_KEY}"},
+                json=texts,
+            )
+            r.raise_for_status()
+            return r.json()["embeddings"]
+        except httpx.TimeoutException as e:
+            raise ValueError(f"bgem3_embed timed out: {e}") from e
+        except httpx.HTTPStatusError as e:
+            raise ValueError(f"bgem3_embed error {e.response.status_code}: {e.response.text}") from e
 
 
 @mcp.tool()
@@ -45,16 +61,23 @@ async def embed_hybrid(texts: list[str]) -> dict:
 
     Returns:
         Dict with 'dense_embeddings' (1024-dim) and 'sparse_embeddings' (token weights).
+
+    Raises:
+        ValueError: if bgem3_embed service returns an error.
     """
-    async with httpx.AsyncClient() as client:
-        r = await client.post(
-            f"{BGEM3_URL}/embed/hybrid",
-            headers={"Authorization": f"Bearer {API_KEY}"},
-            json=texts,
-            timeout=30.0,
-        )
-        r.raise_for_status()
-        return r.json()
+    async with httpx.AsyncClient(timeout=_HYBRID_TIMEOUT) as client:
+        try:
+            r = await client.post(
+                f"{BGEM3_URL}/embed/hybrid",
+                headers={"Authorization": f"Bearer {API_KEY}"},
+                json=texts,
+            )
+            r.raise_for_status()
+            return r.json()
+        except httpx.TimeoutException as e:
+            raise ValueError(f"bgem3_embed hybrid timed out: {e}") from e
+        except httpx.HTTPStatusError as e:
+            raise ValueError(f"bgem3_embed hybrid error {e.response.status_code}: {e.response.text}") from e
 
 
 @mcp.tool()
@@ -75,16 +98,23 @@ async def rerank(query: str, passages: list[str], top_n: int = 0) -> list[dict]:
           - index (int):  original position in the passages list
           - score (float): normalised relevance score 0–1
           - text  (str):  the passage text
+
+    Raises:
+        ValueError: if bgem3_rerank service returns an error or times out.
     """
-    async with httpx.AsyncClient() as client:
-        r = await client.post(
-            f"{RERANK_URL}/rerank",
-            headers={"Authorization": f"Bearer {API_KEY}"},
-            json={"query": query, "passages": passages, "top_n": top_n},
-            timeout=60.0,
-        )
-        r.raise_for_status()
-        return r.json()["results"]
+    async with httpx.AsyncClient(timeout=_RERANK_TIMEOUT) as client:
+        try:
+            r = await client.post(
+                f"{RERANK_URL}/rerank",
+                headers={"Authorization": f"Bearer {API_KEY}"},
+                json={"query": query, "passages": passages, "top_n": top_n},
+            )
+            r.raise_for_status()
+            return r.json()["results"]
+        except httpx.TimeoutException as e:
+            raise ValueError(f"bgem3_rerank timed out after 60s: {e}") from e
+        except httpx.HTTPStatusError as e:
+            raise ValueError(f"bgem3_rerank error {e.response.status_code}: {e.response.text}") from e
 
 
 if __name__ == "__main__":
