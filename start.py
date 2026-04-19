@@ -3,15 +3,15 @@ start.py — Full lifecycle manager for all three services.
 
   rag_server      port 8000  (BGE-M3 embeddings)
   reranker_server port 8002  (bge-reranker-v2-m3 cross-encoder)
-  mcp_server      port 8001  (FastMCP tool wrapper)
+  mcp_server      port 8001  (FastMCP — exposes embed, embed_hybrid, rerank)
 
 Steps (fails fast on any error):
   1. Kill stale processes on ports 8000, 8001, 8002
-  2. Run preflight checks
+  2. Run preflight checks (validates tools defined in mcp_server.py)
   3. Start rag_server, wait for /health
   4. Start reranker_server, wait for /health
-  5. Start mcp_server, wait for port open
-  6. Run smoke tests
+  5. Start mcp_server, wait for port open, list exposed MCP tools
+  6. Run smoke tests (test_service.py)
   7. Report PIDs + log paths, stay alive (Ctrl+C stops all)
 
 Usage:
@@ -23,6 +23,7 @@ Logs:
     logs/mcp_server.log
 """
 
+import json
 import os
 import signal
 import socket
@@ -42,6 +43,7 @@ MCP_PORT        = 8001
 RERANK_PORT     = 8002
 RAG_URL         = f"http://{ZT_IP}:{RAG_PORT}"
 RERANK_URL      = f"http://{ZT_IP}:{RERANK_PORT}"
+MCP_URL         = f"http://{ZT_IP}:{MCP_PORT}"
 HEALTH_TIMEOUT  = 60   # seconds (model load ~30s each)
 HEALTH_POLL     = 2
 LOG_DIR         = "logs"
@@ -151,9 +153,33 @@ def start_uvicorn(module: str, port: int, log_path: str) -> subprocess.Popen:
     )
 
 
+def list_mcp_tools(url: str) -> list[str]:
+    """Query the MCP server for its tool list via JSON-RPC tools/list."""
+    payload = {"jsonrpc": "2.0", "id": "preflight", "method": "tools/list", "params": {}}
+    try:
+        r = httpx.post(
+            f"{url}/mcp/",
+            headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
+            content=json.dumps(payload),
+            timeout=10,
+        )
+        text = r.text.strip()
+        # Handle SSE response
+        if text.startswith("data:"):
+            for line in text.splitlines():
+                if line.startswith("data:"):
+                    text = line[len("data:"):].strip()
+                    break
+        data = json.loads(text)
+        tools = data.get("result", {}).get("tools", [])
+        return [t["name"] for t in tools]
+    except Exception:
+        return []
+
+
 # ── Main ────────────────────────────────────────────────────────────────────────────────
 
-print(f"\n{BOLD}=== BGE-M3 + Reranker Service Startup ==={RESET}\n")
+print(f"\n{BOLD}=== BGE-M3 + Reranker + MCP Startup ==={RESET}\n")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # Step 1: Kill stale
@@ -205,7 +231,15 @@ if not wait_for_port(ZT_IP, MCP_PORT, timeout=20, poll=1):
     rerank_proc.terminate()
     rag_proc.terminate()
     fail(f"mcp_server did not open port {MCP_PORT} within 20s. Check logs/mcp_server.log")
-ok(f"mcp_server live → http://{ZT_IP}:{MCP_PORT}")
+ok(f"mcp_server live → {MCP_URL}")
+
+# List exposed MCP tools
+time.sleep(2)  # brief settle
+tools = list_mcp_tools(MCP_URL)
+if tools:
+    ok(f"MCP tools exposed: {', '.join(tools)}")
+else:
+    warn("Could not retrieve MCP tool list — server may still be initialising")
 
 # Step 6: Smoke tests
 info("Step 6/6: Running smoke tests...")
@@ -217,11 +251,12 @@ ok("All smoke tests passed")
 
 # Done
 print(f"\n{GREEN}{BOLD}=== All services up and healthy ==={RESET}")
-print(f"  rag_server       → {RAG_URL}             (PID {rag_proc.pid})")
-print(f"  reranker_server  → {RERANK_URL}          (PID {rerank_proc.pid})")
-print(f"  mcp_server       → http://{ZT_IP}:{MCP_PORT}   (PID {mcp_proc.pid})")
-print(f"  Logs             → {LOG_DIR}/")
-print(f"\n{GREEN}Services running in background. Press Ctrl+C to stop all.{RESET}\n")
+print(f"  rag_server       → {RAG_URL}    (PID {rag_proc.pid})  log: logs/rag_server.log")
+print(f"  reranker_server  → {RERANK_URL} (PID {rerank_proc.pid})  log: logs/reranker_server.log")
+print(f"  mcp_server       → {MCP_URL}    (PID {mcp_proc.pid})  log: logs/mcp_server.log")
+if tools:
+    print(f"  MCP tools        : {', '.join(tools)}")
+print(f"\n{GREEN}Press Ctrl+C to stop all services.{RESET}\n")
 
 # Keep alive, forward Ctrl+C
 try:

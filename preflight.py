@@ -2,13 +2,15 @@
 preflight.py — Run this before starting rag_server, reranker_server, or mcp_server.
 
 Checks:
-  1. Python version == 3.11.x
-  2. Required packages importable
-  3. MPS (Apple Silicon GPU) available
-  4. .env file exists and EMBEDDING_API_KEY is set
-  5. BGE-M3 model weights cached locally
-  6. BGE-reranker-v2-m3 weights cached locally
-  7. Ports 8000, 8001, 8002 are free
+  1.  Python version == 3.11.x
+  2.  Required packages importable
+  3.  FlagReranker available in FlagEmbedding
+  4.  MPS (Apple Silicon GPU) available
+  5.  .env file exists and EMBEDDING_API_KEY is set
+  6.  BGE-M3 embedder weights cached locally
+  7.  bge-reranker-v2-m3 weights cached locally
+  8.  mcp_server.py exists and defines all three tools (embed, embed_hybrid, rerank)
+  9.  Ports 8000, 8001, 8002 are free
 
 Usage:
     uv run python preflight.py
@@ -18,6 +20,7 @@ FAIL = hard blocker. WARN = non-fatal but worth fixing.
 
 import importlib
 import os
+import re
 import socket
 import sys
 
@@ -43,7 +46,7 @@ def check(label: str, ok: bool, msg: str = "", warn: bool = False) -> None:
         failures += 1
 
 
-print("\n=== BGE-M3 + Reranker Preflight Check ===\n")
+print("\n=== BGE-M3 + Reranker + MCP Preflight Check ===\n")
 
 # 1. Python version (must be exactly 3.11)
 pv = sys.version_info
@@ -73,14 +76,14 @@ for mod, pkg in REQUIRED_PACKAGES:
     except ImportError:
         check(f"Package: {pkg}", False, f"run: uv add {pkg}")
 
-# Verify FlagReranker is available inside FlagEmbedding
+# 3. FlagReranker available
 try:
     from FlagEmbedding import FlagReranker  # noqa: F401
     check("FlagReranker available in FlagEmbedding", True)
 except ImportError:
     check("FlagReranker available in FlagEmbedding", False, "run: uv add FlagEmbedding --upgrade")
 
-# 3. MPS available
+# 4. MPS available
 try:
     import torch
     mps_ok = torch.backends.mps.is_available()
@@ -93,7 +96,7 @@ try:
 except Exception as e:
     check("MPS check", False, str(e))
 
-# 4. .env and EMBEDDING_API_KEY
+# 5. .env and EMBEDDING_API_KEY
 env_exists = os.path.exists(".env")
 check(".env file exists", env_exists, "create .env from .env.example")
 api_key = os.getenv("EMBEDDING_API_KEY", "")
@@ -107,7 +110,7 @@ else:
         warn=True,
     )
 
-# 5. BGE-M3 embedder weights cached
+# 6. BGE-M3 embedder weights cached
 HF_HOME = os.getenv("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
 bgem3_path = os.path.join(HF_HOME, "hub", "models--BAAI--bge-m3")
 check(
@@ -117,7 +120,7 @@ check(
     warn=not os.path.isdir(bgem3_path),
 )
 
-# 6. BGE-reranker-v2-m3 weights cached
+# 7. bge-reranker-v2-m3 weights cached
 reranker_path = os.path.join(HF_HOME, "hub", "models--BAAI--bge-reranker-v2-m3")
 check(
     f"bge-reranker-v2-m3 weights cached ({reranker_path})",
@@ -126,7 +129,20 @@ check(
     warn=not os.path.isdir(reranker_path),
 )
 
-# 7. Ports free
+# 8. mcp_server.py exists and exposes all three tools
+mcp_file = "mcp_server.py"
+if not os.path.exists(mcp_file):
+    check("mcp_server.py exists", False, "file not found — cannot start MCP service")
+else:
+    check("mcp_server.py exists", True)
+    src = open(mcp_file).read()
+    for tool in ("embed", "embed_hybrid", "rerank"):
+        # Match @mcp.tool() decorator followed (eventually) by async def <tool>(
+        pattern = rf'@mcp\.tool\(\).*?async def {tool}\s*\('
+        found = bool(re.search(pattern, src, re.DOTALL))
+        check(f"mcp_server.py defines tool: {tool}", found, f"@mcp.tool() + async def {tool}() not found")
+
+# 9. Ports free
 for port, name in [(8000, "rag_server"), (8001, "mcp_server"), (8002, "reranker_server")]:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(1)
