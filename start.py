@@ -1,20 +1,25 @@
 """
-start.py — Full lifecycle manager for rag_server (8000) and mcp_server (8001).
+start.py — Full lifecycle manager for all three services.
+
+  rag_server      port 8000  (BGE-M3 embeddings)
+  reranker_server port 8002  (bge-reranker-v2-m3 cross-encoder)
+  mcp_server      port 8001  (FastMCP tool wrapper)
 
 Steps (fails fast on any error):
-  1. Kill any existing process on ports 8000 and 8001
-  2. Kill any stale rag_server.py / mcp_server.py / uvicorn processes by name
-  3. Run preflight checks (preflight.py)
-  4. Start rag_server on port 8000, wait until /health responds
-  5. Start mcp_server on port 8001, wait until port is open
-  6. Run smoke tests (test_service.py)
-  7. Report final status
+  1. Kill stale processes on ports 8000, 8001, 8002
+  2. Run preflight checks
+  3. Start rag_server, wait for /health
+  4. Start reranker_server, wait for /health
+  5. Start mcp_server, wait for port open
+  6. Run smoke tests
+  7. Report PIDs + log paths, stay alive (Ctrl+C stops all)
 
 Usage:
     uv run python start.py
 
-Logs from both services are written to:
+Logs:
     logs/rag_server.log
+    logs/reranker_server.log
     logs/mcp_server.log
 """
 
@@ -31,47 +36,35 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── Config ────────────────────────────────────────────────────────────────────────────────
-ZT_IP = "10.230.57.109"
-RAG_PORT = 8000
-MCP_PORT = 8001
-RAG_URL = f"http://{ZT_IP}:{RAG_PORT}"
-HEALTH_TIMEOUT = 60  # seconds to wait for /health to respond
-HEALTH_POLL = 2  # seconds between polls
-LOG_DIR = "logs"
+ZT_IP           = "10.230.57.109"
+RAG_PORT        = 8000
+MCP_PORT        = 8001
+RERANK_PORT     = 8002
+RAG_URL         = f"http://{ZT_IP}:{RAG_PORT}"
+RERANK_URL      = f"http://{ZT_IP}:{RERANK_PORT}"
+HEALTH_TIMEOUT  = 60   # seconds (model load ~30s each)
+HEALTH_POLL     = 2
+LOG_DIR         = "logs"
 
-GREEN = "\033[32m"
-RED = "\033[31m"
+GREEN  = "\033[32m"
+RED    = "\033[31m"
 YELLOW = "\033[33m"
-RESET = "\033[0m"
-BOLD = "\033[1m"
+RESET  = "\033[0m"
+BOLD   = "\033[1m"
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────────────────
 
-
-def info(msg: str) -> None:
-    print(f"{BOLD}[INFO]{RESET} {msg}")
-
-
-def ok(msg: str) -> None:
-    print(f"{GREEN}[ OK ]{RESET} {msg}")
-
-
-def warn(msg: str) -> None:
-    print(f"{YELLOW}[WARN]{RESET} {msg}")
-
-
-def fail(msg: str) -> None:
-    print(f"{RED}[FAIL]{RESET} {msg}")
-    sys.exit(1)
+def info(msg: str)  -> None: print(f"{BOLD}[INFO]{RESET} {msg}")
+def ok(msg: str)    -> None: print(f"{GREEN}[ OK ]{RESET} {msg}")
+def warn(msg: str)  -> None: print(f"{YELLOW}[WARN]{RESET} {msg}")
+def fail(msg: str)  -> None: print(f"{RED}[FAIL]{RESET} {msg}"); sys.exit(1)
 
 
 def port_pids(port: int) -> list[int]:
-    """Return PIDs listening on the given port (macOS/Linux via lsof)."""
     try:
         out = subprocess.check_output(
-            ["lsof", "-ti", f"TCP:{port}", "-s", "TCP:LISTEN"],
-            text=True,
+            ["lsof", "-ti", f"TCP:{port}", "-s", "TCP:LISTEN"], text=True
         ).strip()
         return [int(p) for p in out.split() if p.isdigit()]
     except subprocess.CalledProcessError:
@@ -79,7 +72,6 @@ def port_pids(port: int) -> list[int]:
 
 
 def kill_port(port: int) -> None:
-    """Kill all processes listening on port."""
     pids = port_pids(port)
     if not pids:
         info(f"Port {port}: nothing to kill")
@@ -91,7 +83,6 @@ def kill_port(port: int) -> None:
         except ProcessLookupError:
             pass
     time.sleep(1)
-    # SIGKILL any survivors
     for pid in port_pids(port):
         try:
             os.kill(pid, signal.SIGKILL)
@@ -101,13 +92,10 @@ def kill_port(port: int) -> None:
 
 
 def kill_by_name(*names: str) -> None:
-    """Kill processes whose command line contains any of the given names."""
     try:
-        out = subprocess.check_output(
-            ["pgrep", "-f", "|".join(names)], text=True
-        ).strip()
+        out = subprocess.check_output(["pgrep", "-f", "|".join(names)], text=True).strip()
     except subprocess.CalledProcessError:
-        return  # no matches
+        return
     own_pid = os.getpid()
     for pid in (int(p) for p in out.split() if p.isdigit()):
         if pid == own_pid:
@@ -126,7 +114,6 @@ def port_open(host: str, port: int) -> bool:
 
 
 def wait_for_health(url: str, timeout: int, poll: int) -> bool:
-    """Poll GET /health until 200 or timeout."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -148,58 +135,63 @@ def wait_for_port(host: str, port: int, timeout: int, poll: int) -> bool:
     return False
 
 
+def start_uvicorn(module: str, port: int, log_path: str) -> subprocess.Popen:
+    log_file = open(log_path, "w")
+    return subprocess.Popen(
+        [
+            sys.executable, "-m", "uvicorn",
+            f"{module}:app",
+            "--host", "0.0.0.0",
+            "--port", str(port),
+            "--log-level", "info",
+        ],
+        stdout=log_file,
+        stderr=log_file,
+        start_new_session=True,
+    )
+
+
 # ── Main ────────────────────────────────────────────────────────────────────────────────
 
-print(f"\n{BOLD}=== BGE-M3 Service Startup ==={RESET}\n")
+print(f"\n{BOLD}=== BGE-M3 + Reranker Service Startup ==={RESET}\n")
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# ── Step 1 & 2: Kill stale processes ────────────────────────────────────────────
-info("Step 1/4: Killing any processes on ports 8000 and 8001...")
-kill_port(RAG_PORT)
-kill_port(MCP_PORT)
-kill_by_name("rag_server", "mcp_server", "uvicorn")
+# Step 1: Kill stale
+info("Step 1/6: Killing stale processes on ports 8000, 8001, 8002...")
+for port in (RAG_PORT, MCP_PORT, RERANK_PORT):
+    kill_port(port)
+kill_by_name("rag_server", "reranker_server", "mcp_server", "uvicorn")
 time.sleep(1)
 ok("Stale processes cleared")
 
-# ── Step 2: Preflight ───────────────────────────────────────────────────────────────
-info("Step 2/4: Running preflight checks...")
+# Step 2: Preflight
+info("Step 2/6: Running preflight checks...")
 result = subprocess.run([sys.executable, "preflight.py"])
 if result.returncode != 0:
     fail("Preflight failed. Fix issues above before starting.")
 ok("Preflight passed")
 
-# ── Step 3: Start rag_server ─────────────────────────────────────────────────────────
-info(f"Step 3/4: Starting rag_server on port {RAG_PORT}...")
-rag_log = open(os.path.join(LOG_DIR, "rag_server.log"), "w")
-rag_proc = subprocess.Popen(
-    [
-        sys.executable,
-        "-m",
-        "uvicorn",
-        "rag_server:app",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        str(RAG_PORT),
-        "--log-level",
-        "info",
-    ],
-    stdout=rag_log,
-    stderr=rag_log,
-    start_new_session=True,
-)
-info(
-    f"rag_server PID {rag_proc.pid} — waiting for /health (up to {HEALTH_TIMEOUT}s, model load takes ~30s)..."
-)
+# Step 3: rag_server
+info(f"Step 3/6: Starting rag_server on port {RAG_PORT}...")
+rag_proc = start_uvicorn("rag_server", RAG_PORT, os.path.join(LOG_DIR, "rag_server.log"))
+info(f"rag_server PID {rag_proc.pid} — waiting for /health (model load ~30s)...")
 if not wait_for_health(RAG_URL, HEALTH_TIMEOUT, HEALTH_POLL):
     rag_proc.terminate()
-    fail(
-        f"rag_server did not become healthy within {HEALTH_TIMEOUT}s. Check logs/rag_server.log"
-    )
-ok(f"rag_server healthy on {RAG_URL}")
+    fail(f"rag_server not healthy after {HEALTH_TIMEOUT}s. Check logs/rag_server.log")
+ok(f"rag_server healthy → {RAG_URL}")
 
-# ── Step 4: Start mcp_server ─────────────────────────────────────────────────────────
-info(f"Step 4/4: Starting mcp_server on port {MCP_PORT}...")
+# Step 4: reranker_server
+info(f"Step 4/6: Starting reranker_server on port {RERANK_PORT}...")
+rerank_proc = start_uvicorn("reranker_server", RERANK_PORT, os.path.join(LOG_DIR, "reranker_server.log"))
+info(f"reranker_server PID {rerank_proc.pid} — waiting for /health (model load ~20s)...")
+if not wait_for_health(RERANK_URL, HEALTH_TIMEOUT, HEALTH_POLL):
+    rerank_proc.terminate()
+    rag_proc.terminate()
+    fail(f"reranker_server not healthy after {HEALTH_TIMEOUT}s. Check logs/reranker_server.log")
+ok(f"reranker_server healthy → {RERANK_URL}")
+
+# Step 5: mcp_server
+info(f"Step 5/6: Starting mcp_server on port {MCP_PORT}...")
 mcp_log = open(os.path.join(LOG_DIR, "mcp_server.log"), "w")
 mcp_proc = subprocess.Popen(
     [sys.executable, "mcp_server.py"],
@@ -210,19 +202,34 @@ mcp_proc = subprocess.Popen(
 info(f"mcp_server PID {mcp_proc.pid} — waiting for port {MCP_PORT}...")
 if not wait_for_port(ZT_IP, MCP_PORT, timeout=20, poll=1):
     mcp_proc.terminate()
+    rerank_proc.terminate()
     rag_proc.terminate()
-    fail(
-        f"mcp_server did not open port {MCP_PORT} within 20s. Check logs/mcp_server.log"
-    )
-ok(f"mcp_server live on {ZT_IP}:{MCP_PORT}")
+    fail(f"mcp_server did not open port {MCP_PORT} within 20s. Check logs/mcp_server.log")
+ok(f"mcp_server live → http://{ZT_IP}:{MCP_PORT}")
 
-# ── Done ──────────────────────────────────────────────────────────────────────────────────
+# Step 6: Smoke tests
+info("Step 6/6: Running smoke tests...")
+result = subprocess.run([sys.executable, "test_service.py"])
+if result.returncode != 0:
+    warn("Smoke tests failed — services running but something is wrong. Check logs/.")
+    sys.exit(1)
+ok("All smoke tests passed")
+
+# Done
 print(f"\n{GREEN}{BOLD}=== All services up and healthy ==={RESET}")
-print(f"  rag_server  → {RAG_URL}          (PID {rag_proc.pid})")
-print(f"  mcp_server  → http://{ZT_IP}:{MCP_PORT}  (PID {mcp_proc.pid})")
-print(f"  Logs        → {LOG_DIR}/rag_server.log, {LOG_DIR}/mcp_server.log")
-print(f"\n{GREEN}Services are running in the background.{RESET}\n")
+print(f"  rag_server       → {RAG_URL}             (PID {rag_proc.pid})")
+print(f"  reranker_server  → {RERANK_URL}          (PID {rerank_proc.pid})")
+print(f"  mcp_server       → http://{ZT_IP}:{MCP_PORT}   (PID {mcp_proc.pid})")
+print(f"  Logs             → {LOG_DIR}/")
+print(f"\n{GREEN}Services running in background. Press Ctrl+C to stop all.{RESET}\n")
 
-# Detach processes so they survive terminal close
-rag_log.close()
-mcp_log.close()
+# Keep alive, forward Ctrl+C
+try:
+    rag_proc.wait()
+except KeyboardInterrupt:
+    info("Shutting down all services...")
+    for proc in (rag_proc, rerank_proc, mcp_proc):
+        proc.terminate()
+    for proc in (rag_proc, rerank_proc, mcp_proc):
+        proc.wait()
+    ok("All services stopped cleanly.")
