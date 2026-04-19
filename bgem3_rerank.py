@@ -32,7 +32,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from FlagEmbedding import FlagReranker
 from pydantic import BaseModel
 
-# ── Auth ──────────────────────────────────────────────────────────────────────────────
+# ── Auth ────────────────────────────────────────────────────────────────────────────────────
 # Reads same key as rag_server — one key for all local services.
 _API_KEY = os.getenv("EMBEDDING_API_KEY", "")
 _bearer_scheme = HTTPBearer(auto_error=False)
@@ -46,9 +46,47 @@ def _check_api_key(credentials: HTTPAuthorizationCredentials | None) -> None:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
-# ── Module-level state ──────────────────────────────────────────────────────────────────────
+# ── Module-level state ───────────────────────────────────────────────────────────────────────────────────────
+MAX_QUEUE: int = int(os.getenv("RERANK_MAX_QUEUE", "4"))
+INFERENCE_TIMEOUT: float = float(os.getenv("RERANK_INFERENCE_TIMEOUT", "60.0"))
+
 _mps_lock: asyncio.Semaphore
 _reranker: FlagReranker = None
+_queue_depth: int = 0
+
+
+async def _run_with_gpu_lock(fn) -> Any:
+    """
+    Acquire the MPS semaphore, run *fn* in a thread, and enforce INFERENCE_TIMEOUT.
+
+    Raises:
+        HTTP 503 if the queue is full (queue depth >= MAX_QUEUE).
+        HTTP 504 if inference does not complete within INFERENCE_TIMEOUT seconds.
+    """
+    global _queue_depth
+
+    if _queue_depth >= MAX_QUEUE:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Server busy: {_queue_depth} requests queued (limit {MAX_QUEUE}). Retry later.",
+        )
+
+    _queue_depth += 1
+    try:
+        async with _mps_lock:
+            try:
+                result = await asyncio.wait_for(
+                    anyio.to_thread.run_sync(fn),
+                    timeout=INFERENCE_TIMEOUT,
+                )
+                return result
+            except asyncio.TimeoutError:
+                raise HTTPException(
+                    status_code=504,
+                    detail=f"Inference timed out after {INFERENCE_TIMEOUT}s. Try fewer passages.",
+                )
+    finally:
+        _queue_depth -= 1
 
 
 async def lifespan(app: FastAPI):
@@ -70,6 +108,7 @@ async def lifespan(app: FastAPI):
             normalize=True,
         )
         print("bge-reranker-v2-m3 ready on MPS")
+        print(f"Concurrency: MAX_QUEUE={MAX_QUEUE}, INFERENCE_TIMEOUT={INFERENCE_TIMEOUT}s")
         if _API_KEY:
             print("Auth enabled: Bearer token required for /rerank")
         else:
@@ -94,7 +133,7 @@ async def add_process_time_header(request: Request, call_next):
     return response
 
 
-# ── Request/response models ──────────────────────────────────────────────────────────────
+# ── Request/response models ────────────────────────────────────────────────────────────────────────────────────
 
 
 class RerankRequest(BaseModel):
@@ -118,7 +157,7 @@ class RerankResponse(BaseModel):
     returned: int
 
 
-# ── Endpoints ─────────────────────────────────────────────────────────────────────────────
+# ── Endpoints ──────────────────────────────────────────────────────────────────────────────────────────
 
 
 @app.get("/health")
@@ -134,6 +173,9 @@ def health() -> dict[str, Any]:
         "memory_percent": mem.percent,
         "mps_available": torch.backends.mps.is_available(),
         "semaphore_locked": _mps_lock.locked() if _mps_lock is not None else False,
+        "queue_depth": _queue_depth,
+        "max_queue": MAX_QUEUE,
+        "inference_timeout": INFERENCE_TIMEOUT,
     }
 
 
@@ -147,6 +189,8 @@ def info() -> dict[str, Any]:
         "fp16": True,
         "auth_enabled": bool(_API_KEY),
         "torch_version": torch.__version__,
+        "max_queue": MAX_QUEUE,
+        "inference_timeout": INFERENCE_TIMEOUT,
     }
 
 
@@ -171,6 +215,8 @@ async def rerank(
         HTTP 401 if auth is enabled and token is wrong/missing.
         HTTP 422 if query or passages are empty.
         HTTP 429 if more than 100 passages (M1 16GB limit).
+        HTTP 503 if queue is full (retry later).
+        HTTP 504 if inference times out.
         HTTP 500 on model error.
     """
     _check_api_key(credentials)
@@ -187,10 +233,11 @@ async def rerank(
     pairs = [[req.query, p] for p in req.passages]
 
     try:
-        async with _mps_lock:
-            scores: list[float] = await anyio.to_thread.run_sync(
-                lambda: _reranker.compute_score(pairs, normalize=True)
-            )
+        scores: list[float] = await _run_with_gpu_lock(
+            lambda: _reranker.compute_score(pairs, normalize=True)
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Reranking failed: {e}")
 
