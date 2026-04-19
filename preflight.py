@@ -1,5 +1,5 @@
 """
-preflight.py — Run this before starting rag_server, reranker_server, or mcp_server.
+preflight.py — Run this before starting bgem3_embed, bgem3_rerank, or bgem3_mcp.
 
 Checks:
   1.  Python version == 3.11.x
@@ -58,16 +58,16 @@ check(
 
 # 2. Required packages
 REQUIRED_PACKAGES = [
-    ("torch",         "torch"),
+    ("torch", "torch"),
     ("FlagEmbedding", "FlagEmbedding"),
-    ("fastapi",       "fastapi"),
-    ("fastmcp",       "fastmcp"),
-    ("anyio",         "anyio"),
-    ("psutil",        "psutil"),
-    ("httpx",         "httpx"),
-    ("uvicorn",       "uvicorn"),
-    ("dotenv",        "python-dotenv"),
-    ("pydantic",      "pydantic"),
+    ("fastapi", "fastapi"),
+    ("fastmcp", "fastmcp"),
+    ("anyio", "anyio"),
+    ("psutil", "psutil"),
+    ("httpx", "httpx"),
+    ("uvicorn", "uvicorn"),
+    ("dotenv", "python-dotenv"),
+    ("pydantic", "pydantic"),
 ]
 for mod, pkg in REQUIRED_PACKAGES:
     try:
@@ -79,13 +79,19 @@ for mod, pkg in REQUIRED_PACKAGES:
 # 3. FlagReranker available
 try:
     from FlagEmbedding import FlagReranker  # noqa: F401
+
     check("FlagReranker available in FlagEmbedding", True)
 except ImportError:
-    check("FlagReranker available in FlagEmbedding", False, "run: uv add FlagEmbedding --upgrade")
+    check(
+        "FlagReranker available in FlagEmbedding",
+        False,
+        "run: uv add FlagEmbedding --upgrade",
+    )
 
 # 4. MPS available
 try:
     import torch
+
     mps_ok = torch.backends.mps.is_available()
     check(
         "MPS (Apple Silicon GPU) available",
@@ -129,21 +135,28 @@ check(
     warn=not os.path.isdir(reranker_path),
 )
 
-# 8. mcp_server.py exists and exposes all three tools
-mcp_file = "mcp_server.py"
+# 8. bgem3_mcp.py exists and exposes all three tools
+mcp_file = "bgem3_mcp.py"
 if not os.path.exists(mcp_file):
-    check("mcp_server.py exists", False, "file not found — cannot start MCP service")
+    check("bgem3_mcp.py exists", False, "file not found — cannot start MCP service")
 else:
-    check("mcp_server.py exists", True)
+    check("bgem3_mcp.py exists", True)
     src = open(mcp_file).read()
     for tool in ("embed", "embed_hybrid", "rerank"):
-        # Match @mcp.tool() decorator followed (eventually) by async def <tool>(
-        pattern = rf'@mcp\.tool\(\).*?async def {tool}\s*\('
+        pattern = rf"@mcp\.tool\(\).*?async def {tool}\s*\("
         found = bool(re.search(pattern, src, re.DOTALL))
-        check(f"mcp_server.py defines tool: {tool}", found, f"@mcp.tool() + async def {tool}() not found")
+        check(
+            f"bgem3_mcp.py defines tool: {tool}",
+            found,
+            f"@mcp.tool() + async def {tool}() not found",
+        )
 
 # 9. Ports free
-for port, name in [(8000, "rag_server"), (8001, "mcp_server"), (8002, "reranker_server")]:
+for port, name in [
+    (8000, "bgem3_embed"),
+    (8001, "bgem3_mcp"),
+    (8002, "bgem3_rerank"),
+]:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(1)
         in_use = s.connect_ex(("127.0.0.1", port)) == 0
@@ -160,5 +173,7 @@ if failures == 0:
     print("\033[32mAll checks passed. Ready to start services.\033[0m")
     print("  uv run python start.py")
 else:
-    print(f"\033[31m{failures} check(s) failed. Fix above issues before starting.\033[0m")
+    print(
+        f"\033[31m{failures} check(s) failed. Fix above issues before starting.\033[0m"
+    )
     sys.exit(1)

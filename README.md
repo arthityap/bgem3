@@ -14,19 +14,17 @@ Self-hosted embedding generation service using the [BAAI/bge-m3](https://github.
 ┌─────────────────────────────────────────────────────────────┐
 │                     BGEM3 Service                          │
 ├─────────────────────────────────────────────────────────────┤
-│  ┌─────────────────────┐      ┌─────────────────────┐      │
-│  │  rag_server:8000    │      │  mcp_server:8001    │      │
-│  │  (FastAPI)          │      │  (FastMCP)          │      │
-│  │  - /embed          │      │  - embed() tool     │      │
-│  │  - /embed/hybrid  │      │  - embed_hybrid()  │      │
-│  │  - /health        │      │    tool           │      │
-│  │  - /info          │      │                   │      │
-│  └─────────┬──────────┘      └─────────┬─────────┘      │
-│            │                          │                  │
-│            │    BGE-M3 Model         │                  │
-│            │  (FlagEmbedding)        │                  │
-│            │  on MPS (Apple GPU)    │                  │
-│            └──────────────────────────┘                  │
+│  ┌─────────────────────┐ ┌─────────────────────┐ ┌───────┐│
+│  │bgem3_embed:8000   │ │bgem3_rerank:8002   │ │  MCP ││
+│  │   (FastAPI)       │ │   (FastAPI)       │ │ 8001 ││
+│  │ - /embed         │ │ - /rerank         │ │      ││
+│  │ - /embed/hybrid  │ │ - /health        │ │embed ││
+│  │ - /health       │ │ - /info         │ │hybrid││
+│  │ - /info         │ └─────────────────────┘ │rerank│
+│  └────────┬────────┘                           │      │
+│           │         BGE-M3 + Reranker            │      │
+│           │    (FlagEmbedding on MPS)           │      │
+│           └──────────────────────────────────────┘      │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -52,11 +50,13 @@ uv run python start.py
 ```
 
 This script:
-1. Kills any stale processes on ports 8000/8001
+1. Kills any stale processes on ports 8000/8001/8002
 2. Runs preflight checks
-3. Starts rag_server (port 8000)
-4. Starts mcp_server (port 8001)
-5. Exits immediately — services run in background
+3. Starts bgem3_embed (port 8000)
+4. Starts bgem3_rerank (port 8002)
+5. Starts bgem3_mcp (port 8001)
+6. Runs smoke tests
+7. Exits — services stay running in background
 
 ### Test It
 
@@ -69,6 +69,7 @@ uv run python test_service.py
 ```bash
 lsof -ti :8000 | xargs kill
 lsof -ti :8001 | xargs kill
+lsof -ti :8002 | xargs kill
 ```
 
 ## Auto-Start on Boot (launchd)
@@ -88,11 +89,12 @@ launchctl unload ~/Library/LaunchAgents/com.bgem3.server.plist
 
 | File | Purpose |
 |------|----------|
-| `start.py` | Main startup script (kills stale, runs preflight, starts both servers) |
-| `preflight.py` | Environment checks (Python version, packages, ports, model cache) |
-| `test_service.py` | Smoke tests for both services |
-| `rag_server.py` | FastAPI embedding service (port 8000) |
-| `mcp_server.py` | FastMCP server for AI agents (port 8001) |
+| `start.py` | Main startup script (kills stale, runs preflight, starts all 3 servers) |
+| `preflight.py` | Environment checks (Python 3.11, packages, ports, model cache) |
+| `test_service.py` | Smoke tests for all services + MCP tools |
+| `bgem3_embed.py` | FastAPI embedding service (port 8000) |
+| `bgem3_rerank.py` | FastAPI reranker service (port 8002) |
+| `bgem3_mcp.py` | FastMCP server with embed/hybrid/rerank tools (port 8001) |
 | `.python-version` | Pins to Python 3.11 |
 | `pyproject.toml` | Project dependencies |
 | `.env` | API key configuration |
@@ -166,8 +168,9 @@ Run `uv run python preflight.py` to verify:
 - All required packages installed
 - MPS available (Apple Silicon GPU)
 - `.env` file exists with `EMBEDDING_API_KEY`
-- BGE-M3 model weights cached locally
-- Ports 8000 and 8001 are free
+- BGE-M3 + Reranker weights cached locally
+- bgem3_mcp.py has 3 MCP tools defined
+- Ports 8000, 8001, 8002 are free
 
 ## Troubleshooting
 
@@ -210,10 +213,73 @@ Returns:
 ### Model Loading Issues
 
 - First start downloads ~2.3GB model to `~/.cache/huggingface/`
+- Reranker model is ~1.1GB (downloaded on first use)
 - Check internet connection
 - Ensure macOS on Apple Silicon
 
 ### Memory Issues
 
 - Monitor via `/health` endpoint
-- Reduce batch_size in `rag_server.py` if needed
+- Reduce batch_size in `bgem3_embed.py` if needed
+
+### MCP Tool Calls (Important!)
+
+FastMCP requires a session. Call `initialize` first, then use the session ID:
+
+```python
+import httpx
+import json
+
+client = httpx.Client(follow_redirects=True)
+
+# 1. Initialize session
+init_resp = client.post(
+    "http://10.230.57.109:8001/mcp/",
+    headers={
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    },
+    json={
+        "jsonrpc": "2.0",
+        "id": "init",
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "client", "version": "1.0"},
+        },
+    },
+)
+session_id = init_resp.headers.get("mcp-session-id")
+
+# 2. Call tools with session ID
+tool_resp = client.post(
+    "http://10.230.57.109:8001/mcp/",
+    headers={
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "mcp-session-id": session_id,
+    },
+    json={
+        "jsonrpc": "2.0",
+        "id": "1",
+        "method": "tools/call",
+        "params": {
+            "name": "embed",
+            "arguments": {"texts": ["your text here"]},
+        },
+    },
+)
+
+# 3. Parse response (starts with "event: message" then "data: {...}")
+for line in tool_resp.text.splitlines():
+    if line.startswith("data:"):
+        result = json.loads(line[5:].strip())
+        break
+```
+
+Key points:
+- Must call `initialize` before any tool calls
+- Session ID is in `mcp-session-id` header (not JSON body)
+- Accept header must include both `application/json` and `text/event-stream`
+- Response format is `event: message\ndata: {...}`

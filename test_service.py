@@ -2,18 +2,18 @@
 test_service.py — Smoke-test all three services + MCP tools.
 
 Tests:
-  rag_server (8000):
+  bgem3_embed (8000):
     1. GET  /health          — alive + healthy
     2. GET  /info            — model/device info
     3. POST /embed           — returns 1024-dim vector
     4. POST /embed/hybrid    — returns dense + sparse
     5. POST /embed (bad key) — returns HTTP 401 when auth enabled
 
-  reranker_server (8002):
+  bgem3_rerank (8002):
     6. GET  /health          — alive + healthy
     7. POST /rerank          — returns sorted scored passages
 
-  mcp_server (8001) — HTTP transport:
+  bgem3_mcp (8001) — HTTP transport:
     8. GET  /                — FastMCP root responds
     9. POST /mcp/ embed      — MCP tool returns 1024-dim vector
    10. POST /mcp/ embed_hybrid — MCP tool returns dense + sparse
@@ -33,13 +33,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-RAG_URL      = "http://10.230.57.109:8000"
-MCP_URL      = "http://10.230.57.109:8001"
-RERANK_URL   = "http://10.230.57.109:8002"
-API_KEY      = os.getenv("EMBEDDING_API_KEY", "m1macmini")
-HEADERS      = {"Authorization": f"Bearer {API_KEY}"}
-TEST_TEXT    = "The Ten Gods in Bazi represent the relationship between the Day Master and other elements."
-TEST_QUERY   = "What are the Ten Gods in Bazi?"
+RAG_URL = "http://10.230.57.109:8000"
+MCP_URL = "http://10.230.57.109:8001"
+RERANK_URL = "http://10.230.57.109:8002"
+API_KEY = os.getenv("EMBEDDING_API_KEY", "m1macmini")
+HEADERS = {"Authorization": f"Bearer {API_KEY}"}
+TEST_TEXT = "The Ten Gods in Bazi represent the relationship between the Day Master and other elements."
+TEST_QUERY = "What are the Ten Gods in Bazi?"
 TEST_PASSAGES = [
     "The Ten Gods describe relationships between the Day Master and the other nine stems.",
     "Bazi uses four pillars: Year, Month, Day, and Hour.",
@@ -62,7 +62,37 @@ def check(label: str, ok: bool, detail: str = "") -> None:
         failed += 1
 
 
-def mcp_call(client: httpx.Client, tool: str, arguments: dict) -> dict | None:
+def mcp_init(client: httpx.Client) -> str | None:
+    """Initialize MCP session and return session ID from header."""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": "init",
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "test", "version": "1.0"},
+        },
+    }
+    try:
+        r = client.post(
+            f"{MCP_URL}/mcp/",
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
+            content=json.dumps(payload),
+            timeout=10,
+        )
+        # Session ID is in mcp-session-id header
+        return r.headers.get("mcp-session-id")
+    except Exception:
+        return None
+
+
+def mcp_call(
+    client: httpx.Client, tool: str, arguments: dict, session_id: str = None
+) -> dict | None:
     """Send a JSON-RPC 2.0 tools/call to the FastMCP streamable-http endpoint."""
     payload = {
         "jsonrpc": "2.0",
@@ -70,21 +100,24 @@ def mcp_call(client: httpx.Client, tool: str, arguments: dict) -> dict | None:
         "method": "tools/call",
         "params": {"name": tool, "arguments": arguments},
     }
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    if session_id:
+        headers["mcp-session-id"] = session_id
     try:
         r = client.post(
             f"{MCP_URL}/mcp/",
-            headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
+            headers=headers,
             content=json.dumps(payload),
             timeout=60,
         )
-        # FastMCP streamable-http may return SSE or plain JSON depending on version.
-        # Parse the first data: line if SSE, else parse body directly.
+        # FastMCP streamable-http returns "event: message" + "data: {...}"
         text = r.text.strip()
-        if text.startswith("data:"):
-            # SSE — grab first data line
-            for line in text.splitlines():
-                if line.startswith("data:"):
-                    return json.loads(line[len("data:"):].strip())
+        for line in text.splitlines():
+            if line.startswith("data:"):
+                return json.loads(line[5:].strip())
         return r.json()
     except Exception as e:
         return {"error": str(e)}
@@ -92,16 +125,20 @@ def mcp_call(client: httpx.Client, tool: str, arguments: dict) -> dict | None:
 
 print("\n=== BGE-M3 + Reranker + MCP Service Tests ===\n")
 
-with httpx.Client(timeout=60) as client:
-
-    # ── rag_server (8000) ──────────────────────────────────────────────────────────────
-    print("--- rag_server (8000) ---")
+with httpx.Client(timeout=60, follow_redirects=True) as client:
+    # ── bgem3_embed (8000) ──────────────────────────────────────────────────────────────
+    print("--- bgem3_embed (8000) ---")
 
     try:
         r = client.get(f"{RAG_URL}/health")
         data = r.json()
-        check("/health → 200 + healthy", r.status_code == 200 and data.get("status") == "healthy")
-        print(f"       cpu={data.get('cpu_percent')}%  mem={data.get('memory_percent')}%  mps={data.get('mps_available')}")
+        check(
+            "/health → 200 + healthy",
+            r.status_code == 200 and data.get("status") == "healthy",
+        )
+        print(
+            f"       cpu={data.get('cpu_percent')}%  mem={data.get('memory_percent')}%  mps={data.get('mps_available')}"
+        )
     except Exception as e:
         check("/health", False, str(e))
 
@@ -109,7 +146,9 @@ with httpx.Client(timeout=60) as client:
         r = client.get(f"{RAG_URL}/info")
         data = r.json()
         check("/info → 200 + model info", r.status_code == 200 and "model" in data)
-        print(f"       model={data.get('model')}  device={data.get('device')}  auth={data.get('auth_enabled')}")
+        print(
+            f"       model={data.get('model')}  device={data.get('device')}  auth={data.get('auth_enabled')}"
+        )
     except Exception as e:
         check("/info", False, str(e))
 
@@ -125,27 +164,42 @@ with httpx.Client(timeout=60) as client:
     try:
         r = client.post(f"{RAG_URL}/embed/hybrid", headers=HEADERS, json=[TEST_TEXT])
         data = r.json()
-        ok_ = r.status_code == 200 and "dense_embeddings" in data and "sparse_embeddings" in data
+        ok_ = (
+            r.status_code == 200
+            and "dense_embeddings" in data
+            and "sparse_embeddings" in data
+        )
         check("/embed/hybrid → dense + sparse", ok_, f"status={r.status_code}")
     except Exception as e:
         check("/embed/hybrid", False, str(e))
 
     try:
-        r = client.post(f"{RAG_URL}/embed", headers={"Authorization": "Bearer wrongkey"}, json=[TEST_TEXT])
+        r = client.post(
+            f"{RAG_URL}/embed",
+            headers={"Authorization": "Bearer wrongkey"},
+            json=[TEST_TEXT],
+        )
         if API_KEY:
-            check("/embed rejects bad key → 401", r.status_code == 401, f"got {r.status_code}")
+            check(
+                "/embed rejects bad key → 401",
+                r.status_code == 401,
+                f"got {r.status_code}",
+            )
         else:
             check("/embed auth disabled", r.status_code == 200)
     except Exception as e:
         check("/embed bad-key test", False, str(e))
 
-    # ── reranker_server (8002) ─────────────────────────────────────────────────────────
-    print("\n--- reranker_server (8002) ---")
+    # ── bgem3_rerank (8002) ─────────────────────────────────────────────────────────
+    print("\n--- bgem3_rerank (8002) ---")
 
     try:
         r = client.get(f"{RERANK_URL}/health")
         data = r.json()
-        check("/health → 200 + healthy", r.status_code == 200 and data.get("status") == "healthy")
+        check(
+            "/health → 200 + healthy",
+            r.status_code == 200 and data.get("status") == "healthy",
+        )
         print(f"       model={data.get('model')}  mps={data.get('mps_available')}")
     except Exception as e:
         check("/health", False, str(e))
@@ -164,14 +218,23 @@ with httpx.Client(timeout=60) as client:
             and all("score" in x and "text" in x and "index" in x for x in results)
             and results[0]["score"] >= results[1]["score"]
         )
-        check("/rerank → 2 sorted scored passages", ok_, f"status={r.status_code} results={len(results)}")
+        check(
+            "/rerank → 2 sorted scored passages",
+            ok_,
+            f"status={r.status_code} results={len(results)}",
+        )
         if results:
-            print(f"       top score={results[0]['score']:.4f}  idx={results[0]['index']}")
+            print(
+                f"       top score={results[0]['score']:.4f}  idx={results[0]['index']}"
+            )
     except Exception as e:
         check("/rerank", False, str(e))
 
-    # ── mcp_server (8001) ─────────────────────────────────────────────────────────────
-    print("\n--- mcp_server (8001) ---")
+    # ── bgem3_mcp (8001) ─────────────────────────────────────────────────────────────
+    print("\n--- bgem3_mcp (8001) ---")
+
+    # Initialize MCP session first
+    session_id = mcp_init(client)
 
     # 8. Root alive
     try:
@@ -181,7 +244,7 @@ with httpx.Client(timeout=60) as client:
         check("GET / port responding", False, str(e))
 
     # 9. MCP tool: embed
-    resp = mcp_call(client, "embed", {"texts": [TEST_TEXT]})
+    resp = mcp_call(client, "embed", {"texts": [TEST_TEXT]}, session_id)
     err = resp.get("error") if resp else "no response"
     if err and not isinstance(err, dict):
         check("MCP tool: embed → 1024-dim vector", False, str(err))
@@ -191,12 +254,16 @@ with httpx.Client(timeout=60) as client:
             content = resp.get("result", {}).get("content", [{}])[0].get("text", "[]")
             vecs = json.loads(content) if isinstance(content, str) else content
             ok_ = isinstance(vecs, list) and len(vecs) == 1 and len(vecs[0]) == 1024
-            check("MCP tool: embed → 1x1024 vector", ok_, f"got shape {len(vecs)}x{len(vecs[0]) if vecs else 0}")
+            check(
+                "MCP tool: embed → 1x1024 vector",
+                ok_,
+                f"got shape {len(vecs)}x{len(vecs[0]) if vecs else 0}",
+            )
         except Exception as e:
             check("MCP tool: embed", False, str(e))
 
     # 10. MCP tool: embed_hybrid
-    resp = mcp_call(client, "embed_hybrid", {"texts": [TEST_TEXT]})
+    resp = mcp_call(client, "embed_hybrid", {"texts": [TEST_TEXT]}, session_id)
     err = resp.get("error") if resp else "no response"
     if err and not isinstance(err, dict):
         check("MCP tool: embed_hybrid → dense + sparse", False, str(err))
@@ -205,12 +272,21 @@ with httpx.Client(timeout=60) as client:
             content = resp.get("result", {}).get("content", [{}])[0].get("text", "{}")
             data = json.loads(content) if isinstance(content, str) else content
             ok_ = "dense_embeddings" in data and "sparse_embeddings" in data
-            check("MCP tool: embed_hybrid → dense + sparse", ok_, f"keys={list(data.keys())}")
+            check(
+                "MCP tool: embed_hybrid → dense + sparse",
+                ok_,
+                f"keys={list(data.keys())}",
+            )
         except Exception as e:
             check("MCP tool: embed_hybrid", False, str(e))
 
     # 11. MCP tool: rerank
-    resp = mcp_call(client, "rerank", {"query": TEST_QUERY, "passages": TEST_PASSAGES, "top_n": 2})
+    resp = mcp_call(
+        client,
+        "rerank",
+        {"query": TEST_QUERY, "passages": TEST_PASSAGES, "top_n": 2},
+        session_id,
+    )
     err = resp.get("error") if resp else "no response"
     if err and not isinstance(err, dict):
         check("MCP tool: rerank → sorted passages", False, str(err))
@@ -223,9 +299,15 @@ with httpx.Client(timeout=60) as client:
                 and len(results) == 2
                 and results[0]["score"] >= results[1]["score"]
             )
-            check("MCP tool: rerank → 2 sorted passages", ok_, f"got {len(results)} results")
+            check(
+                "MCP tool: rerank → 2 sorted passages",
+                ok_,
+                f"got {len(results)} results",
+            )
             if results:
-                print(f"       top score={results[0]['score']:.4f}  idx={results[0]['index']}")
+                print(
+                    f"       top score={results[0]['score']:.4f}  idx={results[0]['index']}"
+                )
         except Exception as e:
             check("MCP tool: rerank", False, str(e))
 

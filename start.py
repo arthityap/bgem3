@@ -1,16 +1,16 @@
 """
 start.py — Full lifecycle manager for all three services.
 
-  rag_server      port 8000  (BGE-M3 embeddings)
-  reranker_server port 8002  (bge-reranker-v2-m3 cross-encoder)
-  mcp_server      port 8001  (FastMCP — exposes embed, embed_hybrid, rerank)
+  bgem3_embed    port 8000  (BGE-M3 embeddings)
+  bgem3_rerank   port 8002  (bge-reranker-v2-m3 cross-encoder)
+  bgem3_mcp      port 8001  (FastMCP — exposes embed, embed_hybrid, rerank)
 
 Steps (fails fast on any error):
   1. Kill stale processes on ports 8000, 8001, 8002
-  2. Run preflight checks (validates tools defined in mcp_server.py)
-  3. Start rag_server, wait for /health
-  4. Start reranker_server, wait for /health
-  5. Start mcp_server, wait for port open, list exposed MCP tools
+  2. Run preflight checks (validates tools defined in bgem3_mcp.py)
+  3. Start bgem3_embed, wait for /health
+  4. Start bgem3_rerank, wait for /health
+  5. Start bgem3_mcp, wait for port open, list exposed MCP tools
   6. Run smoke tests (test_service.py)
   7. Report PIDs + log paths, stay alive (Ctrl+C stops all)
 
@@ -18,9 +18,9 @@ Usage:
     uv run python start.py
 
 Logs:
-    logs/rag_server.log
-    logs/reranker_server.log
-    logs/mcp_server.log
+    logs/bgem3_embed.log
+    logs/bgem3_rerank.log
+    logs/bgem3_mcp.log
 """
 
 import json
@@ -37,30 +37,42 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── Config ────────────────────────────────────────────────────────────────────────────────
-ZT_IP           = "10.230.57.109"
-RAG_PORT        = 8000
-MCP_PORT        = 8001
-RERANK_PORT     = 8002
-RAG_URL         = f"http://{ZT_IP}:{RAG_PORT}"
-RERANK_URL      = f"http://{ZT_IP}:{RERANK_PORT}"
-MCP_URL         = f"http://{ZT_IP}:{MCP_PORT}"
-HEALTH_TIMEOUT  = 60   # seconds (model load ~30s each)
-HEALTH_POLL     = 2
-LOG_DIR         = "logs"
+ZT_IP = "10.230.57.109"
+RAG_PORT = 8000
+MCP_PORT = 8001
+RERANK_PORT = 8002
+RAG_URL = f"http://{ZT_IP}:{RAG_PORT}"
+RERANK_URL = f"http://{ZT_IP}:{RERANK_PORT}"
+MCP_URL = f"http://{ZT_IP}:{MCP_PORT}"
+HEALTH_TIMEOUT = 60  # seconds (model load ~30s each)
+HEALTH_POLL = 2
+LOG_DIR = "logs"
 
-GREEN  = "\033[32m"
-RED    = "\033[31m"
+GREEN = "\033[32m"
+RED = "\033[31m"
 YELLOW = "\033[33m"
-RESET  = "\033[0m"
-BOLD   = "\033[1m"
+RESET = "\033[0m"
+BOLD = "\033[1m"
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────────────────
 
-def info(msg: str)  -> None: print(f"{BOLD}[INFO]{RESET} {msg}")
-def ok(msg: str)    -> None: print(f"{GREEN}[ OK ]{RESET} {msg}")
-def warn(msg: str)  -> None: print(f"{YELLOW}[WARN]{RESET} {msg}")
-def fail(msg: str)  -> None: print(f"{RED}[FAIL]{RESET} {msg}"); sys.exit(1)
+
+def info(msg: str) -> None:
+    print(f"{BOLD}[INFO]{RESET} {msg}")
+
+
+def ok(msg: str) -> None:
+    print(f"{GREEN}[ OK ]{RESET} {msg}")
+
+
+def warn(msg: str) -> None:
+    print(f"{YELLOW}[WARN]{RESET} {msg}")
+
+
+def fail(msg: str) -> None:
+    print(f"{RED}[FAIL]{RESET} {msg}")
+    sys.exit(1)
 
 
 def port_pids(port: int) -> list[int]:
@@ -95,7 +107,9 @@ def kill_port(port: int) -> None:
 
 def kill_by_name(*names: str) -> None:
     try:
-        out = subprocess.check_output(["pgrep", "-f", "|".join(names)], text=True).strip()
+        out = subprocess.check_output(
+            ["pgrep", "-f", "|".join(names)], text=True
+        ).strip()
     except subprocess.CalledProcessError:
         return
     own_pid = os.getpid()
@@ -141,11 +155,16 @@ def start_uvicorn(module: str, port: int, log_path: str) -> subprocess.Popen:
     log_file = open(log_path, "w")
     return subprocess.Popen(
         [
-            sys.executable, "-m", "uvicorn",
+            sys.executable,
+            "-m",
+            "uvicorn",
             f"{module}:app",
-            "--host", "0.0.0.0",
-            "--port", str(port),
-            "--log-level", "info",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(port),
+            "--log-level",
+            "info",
         ],
         stdout=log_file,
         stderr=log_file,
@@ -155,11 +174,19 @@ def start_uvicorn(module: str, port: int, log_path: str) -> subprocess.Popen:
 
 def list_mcp_tools(url: str) -> list[str]:
     """Query the MCP server for its tool list via JSON-RPC tools/list."""
-    payload = {"jsonrpc": "2.0", "id": "preflight", "method": "tools/list", "params": {}}
+    payload = {
+        "jsonrpc": "2.0",
+        "id": "preflight",
+        "method": "tools/list",
+        "params": {},
+    }
     try:
         r = httpx.post(
             f"{url}/mcp/",
-            headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
             content=json.dumps(payload),
             timeout=10,
         )
@@ -168,7 +195,7 @@ def list_mcp_tools(url: str) -> list[str]:
         if text.startswith("data:"):
             for line in text.splitlines():
                 if line.startswith("data:"):
-                    text = line[len("data:"):].strip()
+                    text = line[len("data:") :].strip()
                     break
         data = json.loads(text)
         tools = data.get("result", {}).get("tools", [])
@@ -186,7 +213,7 @@ os.makedirs(LOG_DIR, exist_ok=True)
 info("Step 1/6: Killing stale processes on ports 8000, 8001, 8002...")
 for port in (RAG_PORT, MCP_PORT, RERANK_PORT):
     kill_port(port)
-kill_by_name("rag_server", "reranker_server", "mcp_server", "uvicorn")
+kill_by_name("bgem3_embed", "bgem3_rerank", "bgem3_mcp", "uvicorn")
 time.sleep(1)
 ok("Stale processes cleared")
 
@@ -197,41 +224,47 @@ if result.returncode != 0:
     fail("Preflight failed. Fix issues above before starting.")
 ok("Preflight passed")
 
-# Step 3: rag_server
-info(f"Step 3/6: Starting rag_server on port {RAG_PORT}...")
-rag_proc = start_uvicorn("rag_server", RAG_PORT, os.path.join(LOG_DIR, "rag_server.log"))
-info(f"rag_server PID {rag_proc.pid} — waiting for /health (model load ~30s)...")
+# Step 3: bgem3_embed
+info(f"Step 3/6: Starting bgem3_embed on port {RAG_PORT}...")
+rag_proc = start_uvicorn(
+    "bgem3_embed", RAG_PORT, os.path.join(LOG_DIR, "bgem3_embed.log")
+)
+info(f"bgem3_embed PID {rag_proc.pid} — waiting for /health (model load ~30s)...")
 if not wait_for_health(RAG_URL, HEALTH_TIMEOUT, HEALTH_POLL):
     rag_proc.terminate()
-    fail(f"rag_server not healthy after {HEALTH_TIMEOUT}s. Check logs/rag_server.log")
-ok(f"rag_server healthy → {RAG_URL}")
+    fail(f"bgem3_embed not healthy after {HEALTH_TIMEOUT}s. Check logs/bgem3_embed.log")
+ok(f"bgem3_embed healthy → {RAG_URL}")
 
-# Step 4: reranker_server
-info(f"Step 4/6: Starting reranker_server on port {RERANK_PORT}...")
-rerank_proc = start_uvicorn("reranker_server", RERANK_PORT, os.path.join(LOG_DIR, "reranker_server.log"))
-info(f"reranker_server PID {rerank_proc.pid} — waiting for /health (model load ~20s)...")
+# Step 4: bgem3_rerank
+info(f"Step 4/6: Starting bgem3_rerank on port {RERANK_PORT}...")
+rerank_proc = start_uvicorn(
+    "bgem3_rerank", RERANK_PORT, os.path.join(LOG_DIR, "bgem3_rerank.log")
+)
+info(f"bgem3_rerank PID {rerank_proc.pid} — waiting for /health (model load ~20s)...")
 if not wait_for_health(RERANK_URL, HEALTH_TIMEOUT, HEALTH_POLL):
     rerank_proc.terminate()
     rag_proc.terminate()
-    fail(f"reranker_server not healthy after {HEALTH_TIMEOUT}s. Check logs/reranker_server.log")
-ok(f"reranker_server healthy → {RERANK_URL}")
+    fail(
+        f"bgem3_rerank not healthy after {HEALTH_TIMEOUT}s. Check logs/bgem3_rerank.log"
+    )
+ok(f"bgem3_rerank healthy → {RERANK_URL}")
 
-# Step 5: mcp_server
-info(f"Step 5/6: Starting mcp_server on port {MCP_PORT}...")
-mcp_log = open(os.path.join(LOG_DIR, "mcp_server.log"), "w")
+# Step 5: bgem3_mcp
+info(f"Step 5/6: Starting bgem3_mcp on port {MCP_PORT}...")
+mcp_log = open(os.path.join(LOG_DIR, "bgem3_mcp.log"), "w")
 mcp_proc = subprocess.Popen(
-    [sys.executable, "mcp_server.py"],
+    [sys.executable, "bgem3_mcp.py"],
     stdout=mcp_log,
     stderr=mcp_log,
     start_new_session=True,
 )
-info(f"mcp_server PID {mcp_proc.pid} — waiting for port {MCP_PORT}...")
+info(f"bgem3_mcp PID {mcp_proc.pid} — waiting for port {MCP_PORT}...")
 if not wait_for_port(ZT_IP, MCP_PORT, timeout=20, poll=1):
     mcp_proc.terminate()
     rerank_proc.terminate()
     rag_proc.terminate()
-    fail(f"mcp_server did not open port {MCP_PORT} within 20s. Check logs/mcp_server.log")
-ok(f"mcp_server live → {MCP_URL}")
+    fail(f"bgem3_mcp did not open port {MCP_PORT} within 20s. Check logs/bgem3_mcp.log")
+ok(f"bgem3_mcp live → {MCP_URL}")
 
 # List exposed MCP tools
 time.sleep(2)  # brief settle
@@ -251,9 +284,13 @@ ok("All smoke tests passed")
 
 # Done
 print(f"\n{GREEN}{BOLD}=== All services up and healthy ==={RESET}")
-print(f"  rag_server       → {RAG_URL}    (PID {rag_proc.pid})  log: logs/rag_server.log")
-print(f"  reranker_server  → {RERANK_URL} (PID {rerank_proc.pid})  log: logs/reranker_server.log")
-print(f"  mcp_server       → {MCP_URL}    (PID {mcp_proc.pid})  log: logs/mcp_server.log")
+print(
+    f"  bgem3_embed       → {RAG_URL}    (PID {rag_proc.pid})  log: logs/bgem3_embed.log"
+)
+print(
+    f"  bgem3_rerank  → {RERANK_URL} (PID {rerank_proc.pid})  log: logs/bgem3_rerank.log"
+)
+print(f"  bgem3_mcp       → {MCP_URL}    (PID {mcp_proc.pid})  log: logs/bgem3_mcp.log")
 if tools:
     print(f"  MCP tools        : {', '.join(tools)}")
 print(f"\n{GREEN}Press Ctrl+C to stop all services.{RESET}\n")
