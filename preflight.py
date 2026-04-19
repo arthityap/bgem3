@@ -9,7 +9,7 @@ Checks:
   5.  .env file exists and EMBEDDING_API_KEY is set
   6.  BGE-M3 embedder weights cached locally
   7.  bge-reranker-v2-m3 weights cached locally
-  8.  mcp_server.py exists and defines all three tools (embed, embed_hybrid, rerank)
+  8.  bgem3_mcp.py exists and defines all three tools (embed, embed_hybrid, rerank)
   9.  Ports 8000, 8001, 8002 are free
 
 Usage:

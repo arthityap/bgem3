@@ -172,8 +172,39 @@ def start_uvicorn(module: str, port: int, log_path: str) -> subprocess.Popen:
     )
 
 
+def _mcp_init(url: str) -> str | None:
+    """Initialize MCP session and return session ID from header."""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": "init",
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "start.py", "version": "1.0"},
+        },
+    }
+    try:
+        r = httpx.post(
+            f"{url}/mcp/",
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
+            content=json.dumps(payload),
+            timeout=10,
+        )
+        return r.headers.get("mcp-session-id")
+    except Exception:
+        return None
+
+
 def list_mcp_tools(url: str) -> list[str]:
     """Query the MCP server for its tool list via JSON-RPC tools/list."""
+    session_id = _mcp_init(url)
+    if not session_id:
+        return []
+
     payload = {
         "jsonrpc": "2.0",
         "id": "preflight",
@@ -186,12 +217,12 @@ def list_mcp_tools(url: str) -> list[str]:
             headers={
                 "Content-Type": "application/json",
                 "Accept": "application/json, text/event-stream",
+                "mcp-session-id": session_id,
             },
             content=json.dumps(payload),
             timeout=10,
         )
         text = r.text.strip()
-        # Handle SSE response
         if text.startswith("data:"):
             for line in text.splitlines():
                 if line.startswith("data:"):
