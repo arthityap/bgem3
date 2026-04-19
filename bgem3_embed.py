@@ -6,9 +6,12 @@ from typing import Any, Dict
 import anyio
 import psutil
 import torch
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from FlagEmbedding import BGEM3FlagModel
+
+load_dotenv()
 
 # Module-level semaphore and model variable
 _mps_lock: asyncio.Semaphore
@@ -93,7 +96,9 @@ async def lifespan(app: FastAPI):
             return_colbert_vecs=False,
         )
         print("BGE-M3 ready on MPS")
-        print(f"Concurrency: MAX_QUEUE={MAX_QUEUE}, INFERENCE_TIMEOUT={INFERENCE_TIMEOUT}s")
+        print(
+            f"Concurrency: MAX_QUEUE={MAX_QUEUE}, INFERENCE_TIMEOUT={INFERENCE_TIMEOUT}s"
+        )
         if _EMBEDDING_API_KEY:
             print("Auth enabled: Bearer token required for /embed endpoints")
         else:

@@ -8,8 +8,13 @@
     <array>
         <string>/opt/homebrew/bin/uv</string>
         <string>run</string>
-        <string>python</string>
-        <string>bgem3_mcp.py</string>
+        <string>uvicorn</string>
+        <string>bgem3_mcp:mcp.http_app</string>
+        <string>--host</string>
+        <string>10.230.57.109</string>
+        <string>--port</string>
+        <string>8001</string>
+        <string>--factory</string>
     </array>
     <key>WorkingDirectory</key>
     <string>/Users/yapilymm/Downloads/projects/bgem3</string>

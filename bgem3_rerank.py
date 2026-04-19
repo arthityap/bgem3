@@ -27,10 +27,13 @@ from typing import Any
 import anyio
 import psutil
 import torch
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from FlagEmbedding import FlagReranker
 from pydantic import BaseModel
+
+load_dotenv()
 
 # ── Auth ────────────────────────────────────────────────────────────────────────────────────
 # Reads same key as rag_server — one key for all local services.
@@ -108,7 +111,9 @@ async def lifespan(app: FastAPI):
             normalize=True,
         )
         print("bge-reranker-v2-m3 ready on MPS")
-        print(f"Concurrency: MAX_QUEUE={MAX_QUEUE}, INFERENCE_TIMEOUT={INFERENCE_TIMEOUT}s")
+        print(
+            f"Concurrency: MAX_QUEUE={MAX_QUEUE}, INFERENCE_TIMEOUT={INFERENCE_TIMEOUT}s"
+        )
         if _API_KEY:
             print("Auth enabled: Bearer token required for /rerank")
         else:

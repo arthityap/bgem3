@@ -6,7 +6,7 @@ Self-hosted embedding generation service using the [BAAI/bge-m3](https://github.
 
 - Generate **dense embeddings** (1024-dimensional) for text retrieval
 - Generate **hybrid embeddings** (dense + sparse) for hybrid search
-- Exposed via REST API and MCP (Model Context Protocol) for AI agent integration
+- Expose via REST API and MCP (Model Context Protocol) for AI agent integration
 
 ## Architecture
 
@@ -28,76 +28,76 @@ Self-hosted embedding generation service using the [BAAI/bge-m3](https://github.
 └─────────────────────────────────────────────────────────────┘
 ```
 
+## CRITICAL - Always Use These Conventions
+
+> **ALWAYS use `uv` for all Python commands** — never `pip`, never bare `python`
+> 
+> **ALWAYS use the ZeroTier IP `10.230.57.109`** — never `0.0.0.0`, never `127.0.0.1`
+> 
+> **ALWAYS use Authorization Bearer token** — not `X-API-Key` header
+
 ## Quick Start
 
 ### Prerequisites
 
 - macOS on Apple Silicon (M1/M2/M3)
-- ZeroTier installed and connected to network `10.230.57.x`
+- ZeroTier connected to network `10.230.57.x` (check with `ifconfig` to get IP)
 - **Python 3.11** (required — see `.python-version`)
-
-### Install Dependencies
-
-```bash
-cd /Users/yapilymm/Downloads/projects/bgem3
-uv sync
-```
 
 ### Start Services
 
+**Option 1: Use restart.sh (recommended)**
 ```bash
-uv run python start.py
+cd /Users/yapilymm/Downloads/projects/bgem3
+./restart.sh
 ```
 
-This script:
-1. Kills any stale processes on ports 8000/8001/8002
-2. Runs preflight checks
-3. Starts bgem3_embed (port 8000)
-4. Starts bgem3_rerank (port 8002)
-5. Starts bgem3_mcp (port 8001)
-6. Runs smoke tests
-7. Exits — services stay running in background
+**Option 2: Manual uvicorn**
+```bash
+cd /Users/yapilymm/Downloads/projects/bgem3
+uv run uvicorn bgem3_embed:app --host 10.230.57.109 --port 8000 &
+uv run uvicorn bgem3_rerank:app --host 10.230.57.109 --port 8002 &
+uv run uvicorn "bgem3_mcp:mcp.http_app" --host 10.230.57.109 --port 8001 --factory &
+```
+
+**Option 3: launchctl (after reboot)**
+```bash
+launchctl load .launch/com.bgem3.embed.plist
+launchctl load .launch/com.bgem3.rerank.plist
+launchctl load .launch/com.bgem3.mcp.plist
+```
 
 ### Test It
 
 ```bash
-uv run python test_service.py
+uv run test_service.py
 ```
+
+Expected output: `All 11 tests passed.`
 
 ### Stop Services
 
 ```bash
-lsof -ti :8000 | xargs kill
-lsof -ti :8001 | xargs kill
-lsof -ti :8002 | xargs kill
-```
-
-## Auto-Start on Boot (launchd)
-
-For the Mac mini to start services automatically on boot:
-
-```bash
-launchctl load -w ~/Library/LaunchAgents/com.bgem3.server.plist
-```
-
-To unload:
-```bash
-launchctl unload ~/Library/LaunchAgents/com.bgem3.server.plist
+pkill -f "uvicorn bgem3_embed"
+pkill -f "uvicorn bgem3_rerank"
+pkill -f "uvicorn bgem3_mcp"
 ```
 
 ## Files
 
 | File | Purpose |
 |------|----------|
-| `start.py` | Main startup script (kills stale, runs preflight, starts all 3 servers) |
+| `restart.sh` | **Primary startup script** — kills stale, starts all 3 services with correct IPs |
+| `start.py` | Legacy — now just a smoke test runner |
 | `preflight.py` | Environment checks (Python 3.11, packages, ports, model cache) |
 | `test_service.py` | Smoke tests for all services + MCP tools |
 | `bgem3_embed.py` | FastAPI embedding service (port 8000) |
 | `bgem3_rerank.py` | FastAPI reranker service (port 8002) |
 | `bgem3_mcp.py` | FastMCP server with embed/hybrid/rerank tools (port 8001) |
+| `.env` | API key: `EMBEDDING_API_KEY=m1macmini` |
+| `.launch/*.plist` | launchd plists for auto-start on boot |
 | `.python-version` | Pins to Python 3.11 |
 | `pyproject.toml` | Project dependencies |
-| `.env` | API key configuration |
 
 ## API Reference
 
@@ -112,23 +112,28 @@ launchctl unload ~/Library/LaunchAgents/com.bgem3.server.plist
 
 #### Authentication
 
-Include Bearer token in header:
-```
-Authorization: Bearer m1macmini
-```
-
-#### Request Examples
-
-**POST /embed**
+**CORRECT** — use Authorization Bearer:
 ```bash
 curl -X POST http://10.230.57.109:8000/embed \
   -H "Authorization: Bearer m1macmini" \
   -H "Content-Type: application/json" \
   -d '["your text here"]'
+```
 
-# Response
+**WRONG** — never use X-API-Key:
+```bash
+# DON'T DO THIS
+curl -X POST http://10.230.57.109:8000/embed \
+  -H "X-API-Key: m1macmini" \
+  ...
+```
+
+#### Response Examples
+
+**POST /embed**
+```json
 {
-  "embeddings": [[0.0123, -0.0456, ...]],  // 1024-dim vector
+  "embeddings": [[0.0123, -0.0456, ...]],
   "count": 1,
   "dimensions": 1024,
   "model": "BAAI/bge-m3"
@@ -136,13 +141,7 @@ curl -X POST http://10.230.57.109:8000/embed \
 ```
 
 **POST /embed/hybrid**
-```bash
-curl -X POST http://10.230.57.109:8000/embed/hybrid \
-  -H "Authorization: Bearer m1macmini" \
-  -H "Content-Type: application/json" \
-  -d '["your text here"]'
-
-# Response
+```json
 {
   "dense_embeddings": [[0.0123, -0.0456, ...]],
   "sparse_embeddings": [{"token": 0.5}, {"hello": 0.3}, ...],
@@ -150,53 +149,75 @@ curl -X POST http://10.230.57.109:8000/embed/hybrid \
 }
 ```
 
+### Reranker API (port 8002)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/rerank` | POST | Rerank passages for a query |
+| `/health` | GET | Health check |
+| `/info` | GET | Model info |
+
+```bash
+curl -X POST http://10.230.57.109:8002/rerank \
+  -H "Authorization: Bearer m1macmini" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "what is foo?", "passages": ["foo is a bar", "bar is foo", "baz"]}'
+```
+
 ### MCP Server (port 8001)
 
 Connect to: `http://10.230.57.109:8001/mcp`
 
-Tools:
+Tools available:
 | Tool | Description |
 |------|-------------|
 | `embed(texts: list[str])` | Generate dense embeddings |
 | `embed_hybrid(texts: list[str])` | Generate dense + sparse embeddings |
+| `rerank(query: str, passages: list[str])` | Rerank passages |
 
 ## Preflight Checks
 
-Run `uv run python preflight.py` to verify:
+Run `uv run preflight.py` to verify:
 
 - Python == 3.11.x
 - All required packages installed
 - MPS available (Apple Silicon GPU)
-- `.env` file exists with `EMBEDDING_API_KEY`
+- `.env` file exists with `EMBEDDING_API_KEY=m1macmini`
 - BGE-M3 + Reranker weights cached locally
-- bgem3_mcp.py has 3 MCP tools defined
 - Ports 8000, 8001, 8002 are free
 
 ## Troubleshooting
 
-### Server Won't Start
+### Services Won't Start
 
-1. **Check ZeroTier**:
+1. **Check ZeroTier IP is `10.230.57.109`**:
    ```bash
-   ifconfig zt0
+   ifconfig | grep "inet " | grep -v 127.0
    ```
+   If IP changed, update all files that reference `10.230.57.109`
 
 2. **Check ports**:
    ```bash
-   lsof -i :8000
-   lsof -i :8001
+   lsof -i :8000 -i :8001 -i :8002
    ```
 
-3. **Check logs**:
+3. **Check running processes**:
    ```bash
-   tail -50 logs/bgem3_embed.log
-   tail -50 logs/bgem3_mcp.log
+   ps aux | grep uvicorn | grep -v grep
+   ```
+
+4. **Check logs**:
+   ```bash
+   tail -30 logs/bgem3_embed.log
+   tail -30 logs/bgem3_mcp.log
+   tail -30 logs/bgem3_rerank.log
    ```
 
 ### Health Check
 
 ```bash
 curl http://10.230.57.109:8000/health
+curl http://10.230.57.109:8002/health
 ```
 
 Returns:
@@ -210,105 +231,74 @@ Returns:
 }
 ```
 
+### Auth Not Working
+
+If `/info` shows `"auth_enabled": false` but `.env` has the key:
+
+**Cause**: Services started without loading `.env`
+
+**Fix**: Services MUST call `load_dotenv()` at module level. This is already done in `bgem3_embed.py` and `bgem3_rerank.py`. If you see auth disabled, the service may be an old process — restart with `restart.sh`
+
+### MCP Tool Calls Hang
+
+**Cause**: Using FastMCP without `stateless_http=True`
+
+**Fix**: Start MCP with `--factory` and the callable `mcp.http_app`:
+```bash
+uv run uvicorn "bgem3_mcp:mcp.http_app" --host 10.230.57.109 --port 8001 --factory
+```
+
 ### Model Loading Issues
 
 - First start downloads ~2.3GB model to `~/.cache/huggingface/`
 - Reranker model is ~1.1GB (downloaded on first use)
-- Check internet connection
-- Ensure macOS on Apple Silicon
+- Check internet connection to HuggingFace
 
 ### Memory Issues
 
 - Monitor via `/health` endpoint
 - Reduce batch_size in `bgem3_embed.py` if needed
 
-### MCP Tool Calls (Important!)
+## Key Technical Details
 
-FastMCP requires a session. Call `initialize` first, then use the session ID:
+### load_dotenv Required
 
-```python
-import httpx
-import json
-
-client = httpx.Client(follow_redirects=True)
-
-# 1. Initialize session
-init_resp = client.post(
-    "http://10.230.57.109:8001/mcp/",
-    headers={
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream",
-    },
-    json={
-        "jsonrpc": "2.0",
-        "id": "init",
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {"name": "client", "version": "1.0"},
-        },
-    },
-)
-session_id = init_resp.headers.get("mcp-session-id")
-
-# 2. Call tools with session ID
-tool_resp = client.post(
-    "http://10.230.57.109:8001/mcp/",
-    headers={
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream",
-        "mcp-session-id": session_id,
-    },
-    json={
-        "jsonrpc": "2.0",
-        "id": "1",
-        "method": "tools/call",
-        "params": {
-            "name": "embed",
-            "arguments": {"texts": ["your text here"]},
-        },
-    },
-)
-
-# 3. Parse response (starts with "event: message" then "data: {...}")
-for line in tool_resp.text.splitlines():
-    if line.startswith("data:"):
-        result = json.loads(line[5:].strip())
-        break
-```
-
-Key points:
-- Must call `initialize` before any tool calls
-- Session ID is in `mcp-session-id` header (not JSON body)
-- Accept header must include both `application/json` and `text/event-stream`
-- Response format is `event: message\ndata: {...}`
-
-### MCP Server Won't Respond (Hanging)
-
-If MCP tool calls hang indefinitely, the fix is to pass `stateless_http=True` to the transport:
+Both `bgem3_embed.py` and `bgem3_rerank.py` must call `load_dotenv()` at the top to read the API key from `.env`:
 
 ```python
-# WRONG (FastMCP holds connection open):
-mcp = FastMCP("BGEM3", stateless_http=True)
-mcp.run(transport="streamable-http", host=IP, port=PORT)
-
-# CORRECT (FastMCP 3.x):
-mcp = FastMCP("BGEM3")
-mcp.run(transport="streamable-http", host=IP, port=PORT, stateless_http=True)
+from dotenv import load_dotenv
+load_dotenv()
 ```
 
-This returns the response immediately instead of waiting for session state that never completes.
+Without this, `EMBEDDING_API_KEY` is empty so auth is disabled even if `.env` has the key.
 
-### Tool Call Timeouts
+### MCP Session Flow
 
-MCP tools have explicit httpx timeouts to fail fast if downstream services are down:
+FastMCP streamable-http requires session initialization:
+
+1. POST `/mcp/` with `initialize` method → get `mcp-session-id` header
+2. POST `/mcp/` with `tools/call` → include `mcp-session-id` header
+3. Parse SSE: extract `data:` line from response
+
+### Explicit Timeouts
+
+MCP tools have explicit httpx timeouts:
 
 - `_EMBED_TIMEOUT`: connect=5s, read=30s
 - `_RERANK_TIMEOUT`: connect=5s, read=60s
 - `_HYBRID_TIMEOUT`: connect=5s, read=45s
 
-If you see "bgem3_embed timed out" or "bgem3_rerank timed out", check:
-1. `bgem3_embed` is running on port 8000
-2. `bgem3_rerank` is running on port 8002
-3. Network connectivity (ZeroTier)
+### launchd Plists Location
+
+- `.launch/com.bgem3.embed.plist` — starts bgem3_embed
+- `.launch/com.bgem3.rerank.plist` — starts bgem3_rerank  
+- `.launch/com.bgem3.mcp.plist` — starts bgem3_mcp
+
+All use ZeroTier IP `10.230.57.109` — never `0.0.0.0`
+
+To enable auto-start on boot:
+```bash
+launchctl load .launch/com.bgem3.embed.plist
+launchctl load .launch/com.bgem3.rerank.plist
+launchctl load .launch/com.bgem3.mcp.plist
+```
