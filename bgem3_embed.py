@@ -10,13 +10,18 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from FlagEmbedding import BGEM3FlagModel
 
-# Configure logging
-# Custom logging handler removed to prevent recursion
-# Was causing maximum recursion depth exceeded error
-
 # Module-level semaphore and model variable
 _mps_lock: asyncio.Semaphore
 _model: BGEM3FlagModel = None
+
+# Concurrency controls
+# MAX_QUEUE: max requests allowed to wait for the semaphore (prevents unbounded RAM growth)
+# INFERENCE_TIMEOUT: max seconds a single inference may hold the lock before aborting
+MAX_QUEUE: int = int(os.getenv("EMBED_MAX_QUEUE", "8"))
+INFERENCE_TIMEOUT: float = float(os.getenv("EMBED_INFERENCE_TIMEOUT", "30.0"))
+
+# Queue depth counter (requests currently waiting OR running)
+_queue_depth: int = 0
 
 # Optional API key auth for embedding endpoints.
 # Set EMBEDDING_API_KEY in .env to enable. Leave empty to disable auth.
@@ -31,6 +36,40 @@ def _check_api_key(credentials: HTTPAuthorizationCredentials | None) -> None:
         return  # auth disabled
     if credentials is None or credentials.credentials != _EMBEDDING_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+async def _run_with_gpu_lock(fn) -> Any:
+    """
+    Acquire the MPS semaphore, run *fn* in a thread, and enforce INFERENCE_TIMEOUT.
+
+    Raises:
+        HTTP 503 if the queue is full (queue depth >= MAX_QUEUE).
+        HTTP 504 if inference does not complete within INFERENCE_TIMEOUT seconds.
+    """
+    global _queue_depth
+
+    if _queue_depth >= MAX_QUEUE:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Server busy: {_queue_depth} requests queued (limit {MAX_QUEUE}). Retry later.",
+        )
+
+    _queue_depth += 1
+    try:
+        async with _mps_lock:
+            try:
+                result = await asyncio.wait_for(
+                    anyio.to_thread.run_sync(fn),
+                    timeout=INFERENCE_TIMEOUT,
+                )
+                return result
+            except asyncio.TimeoutError:
+                raise HTTPException(
+                    status_code=504,
+                    detail=f"Inference timed out after {INFERENCE_TIMEOUT}s. Try fewer texts.",
+                )
+    finally:
+        _queue_depth -= 1
 
 
 async def lifespan(app: FastAPI):
@@ -54,6 +93,7 @@ async def lifespan(app: FastAPI):
             return_colbert_vecs=False,
         )
         print("BGE-M3 ready on MPS")
+        print(f"Concurrency: MAX_QUEUE={MAX_QUEUE}, INFERENCE_TIMEOUT={INFERENCE_TIMEOUT}s")
         if _EMBEDDING_API_KEY:
             print("Auth enabled: Bearer token required for /embed endpoints")
         else:
@@ -95,6 +135,9 @@ def health() -> Dict[str, Any]:
         "memory_available": memory.available,
         "mps_available": torch.backends.mps.is_available(),
         "semaphore_locked": _mps_lock.locked() if _mps_lock is not None else False,
+        "queue_depth": _queue_depth,
+        "max_queue": MAX_QUEUE,
+        "inference_timeout": INFERENCE_TIMEOUT,
     }
 
 
@@ -124,6 +167,8 @@ def info() -> Dict[str, Any]:
         "gpu_info": gpu_info,
         "torch_version": torch.__version__,
         "auth_enabled": bool(_EMBEDDING_API_KEY),
+        "max_queue": MAX_QUEUE,
+        "inference_timeout": INFERENCE_TIMEOUT,
     }
 
 
@@ -147,6 +192,8 @@ async def embed(
         HTTP 401 if auth is enabled and token is wrong/missing
         HTTP 422 if texts is empty
         HTTP 429 if more than 32 texts
+        HTTP 503 if queue is full (retry later)
+        HTTP 504 if inference times out
         HTTP 500 on model error
     """
     _check_api_key(credentials)
@@ -159,22 +206,23 @@ async def embed(
         )
 
     try:
-        async with _mps_lock:
-            result = await anyio.to_thread.run_sync(
-                lambda: _model.encode(
-                    texts,
-                    batch_size=8,
-                    return_dense=True,
-                    return_sparse=False,
-                    return_colbert_vecs=False,
-                )
+        result = await _run_with_gpu_lock(
+            lambda: _model.encode(
+                texts,
+                batch_size=8,
+                return_dense=True,
+                return_sparse=False,
+                return_colbert_vecs=False,
             )
+        )
         return {
             "embeddings": result["dense_vecs"].tolist(),
             "count": len(texts),
             "dimensions": 1024,
             "model": "BAAI/bge-m3",
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Failed to generate embeddings: {str(e)}"
@@ -200,6 +248,8 @@ async def embed_hybrid(
     Raises:
         HTTP 401 if auth is enabled and token is wrong/missing
         HTTP 429 if more than 8 texts
+        HTTP 503 if queue is full (retry later)
+        HTTP 504 if inference times out
         HTTP 500 on model error
     """
     _check_api_key(credentials)
@@ -208,16 +258,15 @@ async def embed_hybrid(
         raise HTTPException(status_code=429, detail="max 8 texts for hybrid on M1 16GB")
 
     try:
-        async with _mps_lock:
-            result = await anyio.to_thread.run_sync(
-                lambda: _model.encode(
-                    texts,
-                    batch_size=4,
-                    return_dense=True,
-                    return_sparse=True,
-                    return_colbert_vecs=False,
-                )
+        result = await _run_with_gpu_lock(
+            lambda: _model.encode(
+                texts,
+                batch_size=4,
+                return_dense=True,
+                return_sparse=True,
+                return_colbert_vecs=False,
             )
+        )
         sparse = [
             {str(k): float(v) for k, v in vec.items()}
             for vec in result["lexical_weights"]
@@ -227,6 +276,8 @@ async def embed_hybrid(
             "sparse_embeddings": sparse,
             "model": "BAAI/bge-m3",
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Failed to generate embeddings: {str(e)}"
