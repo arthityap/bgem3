@@ -100,6 +100,45 @@ Logs in `logs/` directory:
 
 Newer FastMCP versions require session initialization before `tools/list` or `tools/call`. The `start.py` `list_mcp_tools()` function now handles this.
 
+### stateless_http Parameter Location
+
+FastMCP versions >= 3.x don't accept `stateless_http` in `FastMCP.__init__()`. Pass it to `run()` instead:
+
+```python
+# WRONG (raises TypeError):
+mcp = FastMCP("BGEM3", stateless_http=True)
+
+# CORRECT:
+mcp = FastMCP("BGEM3")
+mcp.run(transport="streamable-http", host=IP, port=PORT, stateless_http=True)
+```
+
+Without this, FastMCP holds SSE connections open waiting for session state, causing tool calls to hang indefinitely.
+
+### Explicit Timeouts
+
+FastMCP tools call downstream services (bgem3_embed, bgem3_rerank) via httpx. Timeouts are defined explicitly:
+
+```python
+_EMBED_TIMEOUT  = httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0)
+_RERANK_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=5.0, pool=5.0)
+```
+
+- `connect=5.0`: Fail fast if service is down
+- `read=30/60`: Allow time for model inference
+- Without explicit timeouts, can hang for minutes
+
+### Error Handling
+
+HTTP errors are caught and raised as `ValueError` with readable messages:
+
+```python
+except httpx.HTTPStatusError as e:
+    raise ValueError(f"bgem3_embed error {e.response.status_code}: {e.response.text}") from e
+```
+
+This prevents silent failures or unparseable tracebacks.
+
 ### Port Allocation
 
 - 8000: bgem3_embed

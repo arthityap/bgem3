@@ -283,3 +283,32 @@ Key points:
 - Session ID is in `mcp-session-id` header (not JSON body)
 - Accept header must include both `application/json` and `text/event-stream`
 - Response format is `event: message\ndata: {...}`
+
+### MCP Server Won't Respond (Hanging)
+
+If MCP tool calls hang indefinitely, the fix is to pass `stateless_http=True` to the transport:
+
+```python
+# WRONG (FastMCP holds connection open):
+mcp = FastMCP("BGEM3", stateless_http=True)
+mcp.run(transport="streamable-http", host=IP, port=PORT)
+
+# CORRECT (FastMCP 3.x):
+mcp = FastMCP("BGEM3")
+mcp.run(transport="streamable-http", host=IP, port=PORT, stateless_http=True)
+```
+
+This returns the response immediately instead of waiting for session state that never completes.
+
+### Tool Call Timeouts
+
+MCP tools have explicit httpx timeouts to fail fast if downstream services are down:
+
+- `_EMBED_TIMEOUT`: connect=5s, read=30s
+- `_RERANK_TIMEOUT`: connect=5s, read=60s
+- `_HYBRID_TIMEOUT`: connect=5s, read=45s
+
+If you see "bgem3_embed timed out" or "bgem3_rerank timed out", check:
+1. `bgem3_embed` is running on port 8000
+2. `bgem3_rerank` is running on port 8002
+3. Network connectivity (ZeroTier)

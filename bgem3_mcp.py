@@ -6,18 +6,18 @@ from fastmcp import FastMCP
 # stateless_http=True: no session state stored between requests.
 # This prevents the server from hanging waiting for a session that never
 # completes, which caused the "screen stuck" symptom on tool calls.
-mcp = FastMCP("BGEM3", stateless_http=True)
+mcp = FastMCP("BGEM3")
 
-BGEM3_URL  = "http://10.230.57.109:8000"
+BGEM3_URL = "http://10.230.57.109:8000"
 RERANK_URL = "http://10.230.57.109:8002"
-API_KEY    = os.getenv("EMBEDDING_API_KEY", "m1macmini")
-ZT_IP      = "10.230.57.109"
-MCP_PORT   = 8001
+API_KEY = os.getenv("EMBEDDING_API_KEY", "m1macmini")
+ZT_IP = "10.230.57.109"
+MCP_PORT = 8001
 
 # Shared timeouts — connect fast, allow enough time for model inference.
 # connect: fail quickly if service is down
 # read:    allow full model inference time
-_EMBED_TIMEOUT  = httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0)
+_EMBED_TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0)
 _HYBRID_TIMEOUT = httpx.Timeout(connect=5.0, read=45.0, write=5.0, pool=5.0)
 _RERANK_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=5.0, pool=5.0)
 
@@ -47,7 +47,9 @@ async def embed(texts: list[str]) -> list[list[float]]:
         except httpx.TimeoutException as e:
             raise ValueError(f"bgem3_embed timed out: {e}") from e
         except httpx.HTTPStatusError as e:
-            raise ValueError(f"bgem3_embed error {e.response.status_code}: {e.response.text}") from e
+            raise ValueError(
+                f"bgem3_embed error {e.response.status_code}: {e.response.text}"
+            ) from e
 
 
 @mcp.tool()
@@ -77,7 +79,9 @@ async def embed_hybrid(texts: list[str]) -> dict:
         except httpx.TimeoutException as e:
             raise ValueError(f"bgem3_embed hybrid timed out: {e}") from e
         except httpx.HTTPStatusError as e:
-            raise ValueError(f"bgem3_embed hybrid error {e.response.status_code}: {e.response.text}") from e
+            raise ValueError(
+                f"bgem3_embed hybrid error {e.response.status_code}: {e.response.text}"
+            ) from e
 
 
 @mcp.tool()
@@ -114,8 +118,10 @@ async def rerank(query: str, passages: list[str], top_n: int = 0) -> list[dict]:
         except httpx.TimeoutException as e:
             raise ValueError(f"bgem3_rerank timed out after 60s: {e}") from e
         except httpx.HTTPStatusError as e:
-            raise ValueError(f"bgem3_rerank error {e.response.status_code}: {e.response.text}") from e
+            raise ValueError(
+                f"bgem3_rerank error {e.response.status_code}: {e.response.text}"
+            ) from e
 
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http", host=ZT_IP, port=MCP_PORT)
+    mcp.run(transport="streamable-http", host=ZT_IP, port=MCP_PORT, stateless_http=True)
