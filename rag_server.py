@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 from typing import Any, Dict
 
@@ -6,6 +7,7 @@ import anyio
 import psutil
 import torch
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from FlagEmbedding import BGEM3FlagModel
 
 # Configure logging
@@ -15,6 +17,21 @@ from FlagEmbedding import BGEM3FlagModel
 # Module-level semaphore and model variable
 _mps_lock: asyncio.Semaphore
 _model: BGEM3FlagModel = None
+
+# Optional API key auth for embedding endpoints.
+# Set EMBEDDING_API_KEY in .env to enable. Leave empty to disable auth.
+# /health and /info are always public.
+_EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", "")
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def _check_api_key(credentials: HTTPAuthorizationCredentials | None) -> None:
+    """Raise HTTP 401 if auth is enabled and the token is wrong/missing."""
+    if not _EMBEDDING_API_KEY:
+        return  # auth disabled
+    if credentials is None or credentials.credentials != _EMBEDDING_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
 
 async def lifespan(app: FastAPI):
     global _mps_lock, _model
@@ -40,6 +57,10 @@ async def lifespan(app: FastAPI):
             return_colbert_vecs=False,
         )
         print("BGE-M3 ready on MPS")
+        if _EMBEDDING_API_KEY:
+            print("Auth enabled: Bearer token required for /embed endpoints")
+        else:
+            print("Auth disabled: /embed endpoints are public")
     except Exception as e:
         print(f"Failed to initialize model: {e}")
         raise
@@ -52,7 +73,6 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="BGEM3 Embedding Service", lifespan=lifespan)
 
 
-
 @app.middleware("http")
 async def add_process_time_header(request: Request, call_next):
     start_time = time.time()
@@ -61,9 +81,10 @@ async def add_process_time_header(request: Request, call_next):
     response.headers["X-Process-Time"] = f"{process_time:.4f}s"
     return response
 
+
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    """Health check endpoint with system metrics"""
+    """Health check endpoint with system metrics (always public)"""
     cpu_percent = psutil.cpu_percent()
     memory = psutil.virtual_memory()
 
@@ -81,7 +102,7 @@ def health() -> Dict[str, Any]:
 
 @app.get("/info")
 def info() -> Dict[str, Any]:
-    """Comprehensive service information endpoint"""
+    """Comprehensive service information endpoint (always public)"""
     gpu_info = {}
     if torch.cuda.is_available():
         gpu_info = {
@@ -107,39 +128,36 @@ def info() -> Dict[str, Any]:
         "framework_version": torch.__version__,
         "gpu_info": gpu_info,
         "torch_version": torch.__version__,
-
+        "auth_enabled": bool(_EMBEDDING_API_KEY),
     }
 
-@app.post('/embed')
-async def embed(texts: list[str]) -> Dict[str, Any]:
-    """Generate embeddings for input texts with comprehensive error handling
+
+@app.post("/embed")
+async def embed(
+    texts: list[str],
+    credentials: HTTPAuthorizationCredentials | None = __import__("fastapi").Depends(_bearer_scheme),
+) -> Dict[str, Any]:
+    """Generate dense embeddings for input texts.
 
     Args:
-        texts: List of strings to generate embeddings for
-        api_key: Authentication key (passed automatically via header)
+        texts: List of strings to embed (max 32 on M1 16GB)
+        credentials: Bearer token — required when EMBEDDING_API_KEY is set in .env
 
     Returns:
-        Dictionary containing embeddings and metadata
+        {embeddings, count, dimensions, model}
 
     Raises:
-        HTTPException: 422 for validation errors, 500 for server errors
-
-    Tags:
-        - embeddings
-        - inference
-        - bge-m3
+        HTTP 401 if auth is enabled and token is wrong/missing
+        HTTP 422 if texts is empty
+        HTTP 429 if more than 32 texts
+        HTTP 500 on model error
     """
-    if not texts:
-        raise HTTPException(
-            status_code=422,
-            detail="Text list cannot be empty",
-        )
+    _check_api_key(credentials)
 
+    if not texts:
+        raise HTTPException(status_code=422, detail="Text list cannot be empty")
     if len(texts) > 32:
-        raise HTTPException(
-            status_code=429,
-            detail="max 32 texts per request on M1 16GB",
-        )
+        raise HTTPException(status_code=429, detail="max 32 texts per request on M1 16GB")
 
     try:
         async with _mps_lock:
@@ -159,30 +177,32 @@ async def embed(texts: list[str]) -> Dict[str, Any]:
             "model": "BAAI/bge-m3",
         }
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to generate embeddings: {str(e)}",
-        )
+        raise HTTPException(status_code=500, detail=f"Failed to generate embeddings: {str(e)}")
 
-@app.post('/embed/hybrid')
-async def embed_hybrid(texts: list[str]) -> Dict[str, Any]:
-    """Hybrid embedding endpoint returning dense and sparse vectors in one pass
+
+@app.post("/embed/hybrid")
+async def embed_hybrid(
+    texts: list[str],
+    credentials: HTTPAuthorizationCredentials | None = __import__("fastapi").Depends(_bearer_scheme),
+) -> Dict[str, Any]:
+    """Hybrid embedding endpoint returning dense + sparse vectors in one pass.
 
     Args:
-        texts: List of strings to generate embeddings for
-        api_key: Authentication key (passed automatically via header)
+        texts: List of strings to embed (max 8 on M1 16GB)
+        credentials: Bearer token — required when EMBEDDING_API_KEY is set in .env
 
     Returns:
-        Dictionary containing dense and sparse embeddings
+        {dense_embeddings, sparse_embeddings, model}
 
     Raises:
-        HTTPException: 422 for validation errors, 429 for request size limits
+        HTTP 401 if auth is enabled and token is wrong/missing
+        HTTP 429 if more than 8 texts
+        HTTP 500 on model error
     """
+    _check_api_key(credentials)
+
     if len(texts) > 8:
-        raise HTTPException(
-            status_code=429,
-            detail="max 8 texts for hybrid on M1 16GB",
-        )
+        raise HTTPException(status_code=429, detail="max 8 texts for hybrid on M1 16GB")
 
     try:
         async with _mps_lock:
@@ -202,7 +222,4 @@ async def embed_hybrid(texts: list[str]) -> Dict[str, Any]:
             "model": "BAAI/bge-m3",
         }
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to generate embeddings: {str(e)}",
-        )
+        raise HTTPException(status_code=500, detail=f"Failed to generate embeddings: {str(e)}")
