@@ -37,14 +37,11 @@ async def lifespan(app: FastAPI):
     global _mps_lock, _model
     _mps_lock = asyncio.Semaphore(1)
     try:
-        _model = BGEM3FlagModel(
-            "BAAI/bge-m3",
-            use_fp16=True,
-            device="mps"
-        )
+        _model = BGEM3FlagModel("BAAI/bge-m3", use_fp16=True, device="mps")
         # torch.compile with aot_eager backend (NOT inductor — crashes on MPS)
         try:
             import torch
+
             _model.model = torch.compile(_model.model, backend="aot_eager")
         except Exception as e:
             print(f"torch.compile skipped: {e}")
@@ -69,6 +66,7 @@ async def lifespan(app: FastAPI):
     if _model is not None:
         del _model
         torch.mps.empty_cache()
+
 
 app = FastAPI(title="BGEM3 Embedding Service", lifespan=lifespan)
 
@@ -113,16 +111,13 @@ def info() -> Dict[str, Any]:
             "memory_allocated": torch.cuda.memory_allocated(),
             "memory_reserved": torch.cuda.memory_reserved(),
         }
-    elif _model is not None and str(_model._target_device) == "mps":
-        gpu_info = {
-            "mps_available": True,
-            "device": "Apple Silicon GPU"
-        }
+    elif _model is not None and torch.backends.mps.is_available():
+        gpu_info = {"mps_available": True, "device": "Apple Silicon GPU"}
 
     return {
         "model": "BAAI/bge-m3",
         "dimensions": 1024,
-        "device": str(_model._target_device) if _model else "cpu",
+        "device": "mps" if torch.backends.mps.is_available() else "cpu",
         "batch_size": 4,
         "framework": "FlagEmbedding",
         "framework_version": torch.__version__,
@@ -135,7 +130,9 @@ def info() -> Dict[str, Any]:
 @app.post("/embed")
 async def embed(
     texts: list[str],
-    credentials: HTTPAuthorizationCredentials | None = __import__("fastapi").Depends(_bearer_scheme),
+    credentials: HTTPAuthorizationCredentials | None = __import__("fastapi").Depends(
+        _bearer_scheme
+    ),
 ) -> Dict[str, Any]:
     """Generate dense embeddings for input texts.
 
@@ -157,7 +154,9 @@ async def embed(
     if not texts:
         raise HTTPException(status_code=422, detail="Text list cannot be empty")
     if len(texts) > 32:
-        raise HTTPException(status_code=429, detail="max 32 texts per request on M1 16GB")
+        raise HTTPException(
+            status_code=429, detail="max 32 texts per request on M1 16GB"
+        )
 
     try:
         async with _mps_lock:
@@ -177,13 +176,17 @@ async def embed(
             "model": "BAAI/bge-m3",
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to generate embeddings: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to generate embeddings: {str(e)}"
+        )
 
 
 @app.post("/embed/hybrid")
 async def embed_hybrid(
     texts: list[str],
-    credentials: HTTPAuthorizationCredentials | None = __import__("fastapi").Depends(_bearer_scheme),
+    credentials: HTTPAuthorizationCredentials | None = __import__("fastapi").Depends(
+        _bearer_scheme
+    ),
 ) -> Dict[str, Any]:
     """Hybrid embedding endpoint returning dense + sparse vectors in one pass.
 
@@ -215,11 +218,16 @@ async def embed_hybrid(
                     return_colbert_vecs=False,
                 )
             )
-        sparse = [{str(k): float(v) for k, v in vec.items()} for vec in result["lexical_weights"]]
+        sparse = [
+            {str(k): float(v) for k, v in vec.items()}
+            for vec in result["lexical_weights"]
+        ]
         return {
             "dense_embeddings": result["dense_vecs"].tolist(),
             "sparse_embeddings": sparse,
             "model": "BAAI/bge-m3",
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to generate embeddings: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to generate embeddings: {str(e)}"
+        )

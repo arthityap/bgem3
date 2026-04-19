@@ -1,6 +1,6 @@
 # BGEM3 Embedding Service
 
-Self-hosted embedding generation service using the [BAAI/bge-m3](https://github.com/_flagattribute/FlagEmbedding) model, optimized for Apple Silicon Macs (M1/M2/M3) via Metal Performance Shaders (MPS).
+Self-hosted embedding generation service using the [BAAI/bge-m3](https://github.com/flagattribute/FlagEmbedding) model, optimized for Apple Silicon Macs (M1/M2/M3) via Metal Performance Shaders (MPS).
 
 ## Purpose
 
@@ -14,7 +14,6 @@ Self-hosted embedding generation service using the [BAAI/bge-m3](https://github.
 ┌─────────────────────────────────────────────────────────────┐
 │                     BGEM3 Service                          │
 ├─────────────────────────────────────────────────────────────┤
-│                                                             │
 │  ┌─────────────────────┐      ┌─────────────────────┐      │
 │  │  rag_server:8000    │      │  mcp_server:8001    │      │
 │  │  (FastAPI)          │      │  (FastMCP)          │      │
@@ -26,7 +25,7 @@ Self-hosted embedding generation service using the [BAAI/bge-m3](https://github.
 │            │                          │                  │
 │            │    BGE-M3 Model         │                  │
 │            │  (FlagEmbedding)        │                  │
-│            │  on MPS (Apple GPU)     │                  │
+│            │  on MPS (Apple GPU)    │                  │
 │            └──────────────────────────┘                  │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -37,30 +36,66 @@ Self-hosted embedding generation service using the [BAAI/bge-m3](https://github.
 
 - macOS on Apple Silicon (M1/M2/M3)
 - ZeroTier installed and connected to network `10.230.57.x`
-- Python 3.11
+- **Python 3.11** (required — see `.python-version`)
+
+### Install Dependencies
+
+```bash
+cd /Users/yapilymm/Downloads/projects/bgem3
+uv sync
+```
 
 ### Start Services
 
 ```bash
-# Terminal 1: Embedding API (port 8000)
-./scripts/start_server.sh
-
-# Terminal 2: MCP Server (port 8001)
-./scripts/start_mcp.sh
+uv run python start.py
 ```
+
+This script:
+1. Kills any stale processes on ports 8000/8001
+2. Runs preflight checks
+3. Starts rag_server (port 8000)
+4. Starts mcp_server (port 8001)
+5. Exits immediately — services run in background
 
 ### Test It
 
 ```bash
-# Test embedding API
-curl -X POST http://10.230.57.109:8000/embed \
-  -H "X-API-Key: m1macmini" \
-  -H "Content-Type: application/json" \
-  -d '["hello world", "test embedding"]'
-
-# Health check
-curl http://10.230.57.109:8000/health
+uv run python test_service.py
 ```
+
+### Stop Services
+
+```bash
+lsof -ti :8000 | xargs kill
+lsof -ti :8001 | xargs kill
+```
+
+## Auto-Start on Boot (launchd)
+
+For the Mac mini to start services automatically on boot:
+
+```bash
+launchctl load -w ~/Library/LaunchAgents/com.bgem3.server.plist
+```
+
+To unload:
+```bash
+launchctl unload ~/Library/LaunchAgents/com.bgem3.server.plist
+```
+
+## Files
+
+| File | Purpose |
+|------|----------|
+| `start.py` | Main startup script (kills stale, runs preflight, starts both servers) |
+| `preflight.py` | Environment checks (Python version, packages, ports, model cache) |
+| `test_service.py` | Smoke tests for both services |
+| `rag_server.py` | FastAPI embedding service (port 8000) |
+| `mcp_server.py` | FastMCP server for AI agents (port 8001) |
+| `.python-version` | Pins to Python 3.11 |
+| `pyproject.toml` | Project dependencies |
+| `.env` | API key configuration |
 
 ## API Reference
 
@@ -75,18 +110,17 @@ curl http://10.230.57.109:8000/health
 
 #### Authentication
 
-Include API key in header:
+Include Bearer token in header:
 ```
-X-API-Key: m1macmini
+Authorization: Bearer m1macmini
 ```
 
-#### Request/Response Examples
+#### Request Examples
 
 **POST /embed**
 ```bash
-# Request
 curl -X POST http://10.230.57.109:8000/embed \
-  -H "X-API-Key: m1macmini" \
+  -H "Authorization: Bearer m1macmini" \
   -H "Content-Type: application/json" \
   -d '["your text here"]'
 
@@ -101,9 +135,8 @@ curl -X POST http://10.230.57.109:8000/embed \
 
 **POST /embed/hybrid**
 ```bash
-# Request
 curl -X POST http://10.230.57.109:8000/embed/hybrid \
-  -H "X-API-Key: m1macmini" \
+  -H "Authorization: Bearer m1macmini" \
   -H "Content-Type: application/json" \
   -d '["your text here"]'
 
@@ -117,53 +150,35 @@ curl -X POST http://10.230.57.109:8000/embed/hybrid \
 
 ### MCP Server (port 8001)
 
-The MCP server exposes two tools for AI agent integration:
+Connect to: `http://10.230.57.109:8001/mcp`
 
+Tools:
 | Tool | Description |
 |------|-------------|
 | `embed(texts: list[str])` | Generate dense embeddings |
 | `embed_hybrid(texts: list[str])` | Generate dense + sparse embeddings |
 
-Connect to: `http://10.230.57.109:8001/mcp`
+## Preflight Checks
 
-## Configuration
+Run `uv run python preflight.py` to verify:
 
-### Key Files
-
-| File | Purpose |
-|------|----------|
-| `rag_server.py` | FastAPI embedding service |
-| `mcp_server.py` | FastMCP server for AI agents |
-| `scripts/start_server.sh` | Start embedding API |
-| `scripts/start_mcp.sh` | Start MCP server |
-| `scripts/get_zt_ip.sh` | Get ZeroTier IP address |
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `API_KEY` | `m1macmini` | API authentication key |
-| `MCP_PORT` | `8001` | MCP server port |
-
-### Model Configuration
-
-- **Model**: BAAI/bge-m3
-- **Dimensions**: 1024
-- **Device**: MPS (Apple Silicon GPU)
-- **Batch size**: 8 (embed), 4 (hybrid)
-- **Max texts**: 32 (embed), 8 (hybrid)
+- Python == 3.11.x
+- All required packages installed
+- MPS available (Apple Silicon GPU)
+- `.env` file exists with `EMBEDDING_API_KEY`
+- BGE-M3 model weights cached locally
+- Ports 8000 and 8001 are free
 
 ## Troubleshooting
 
 ### Server Won't Start
 
-1. **Check ZeroTier is running**:
+1. **Check ZeroTier**:
    ```bash
-   # Verify network connection
    ifconfig zt0
    ```
 
-2. **Check ports are available**:
+2. **Check ports**:
    ```bash
    lsof -i :8000
    lsof -i :8001
@@ -171,56 +186,34 @@ Connect to: `http://10.230.57.109:8001/mcp`
 
 3. **Check logs**:
    ```bash
-   tail -50 logs/server.log
+   tail -50 logs/rag_server.log
    tail -50 logs/mcp_server.log
    ```
 
-### Slow Embeddings
+### Health Check
 
-- First request triggers model warmup (expected)
-- Check MPS is available: `curl http://10.230.57.109:8000/health`
-- Reduce batch size in `rag_server.py` if memory issues
+```bash
+curl http://10.230.57.109:8000/health
+```
 
-### Authentication Errors
+Returns:
+```json
+{
+  "status": "healthy",
+  "service": "bgem3",
+  "cpu_percent": 10.5,
+  "memory_percent": 65.2,
+  "mps_available": true
+}
+```
 
-- Verify API key: `X-API-Key: m1macmini`
-- Check header format: exactly as shown above
+### Model Loading Issues
 
-### Model Loading Errors
-
-- Ensure sufficient disk space for model (~500MB)
-- Check internet connection (initial model download)
-- Verify macOS on Apple Silicon
+- First start downloads ~2.3GB model to `~/.cache/huggingface/`
+- Check internet connection
+- Ensure macOS on Apple Silicon
 
 ### Memory Issues
 
-- Monitor with: `curl http://10.230.57.109:8000/health`
-- Reduce batch_size in rag_server.py
-- Restart services to clear MPS memory
-
-## Making Private
-
-To make this repository private:
-
-1. **GitHub**:
-   - Go to repository Settings → Danger Zone → Change repository visibility
-   - Select "Make private"
-
-2. **Local changes**:
-   ```bash
-   # Commit any sensitive files first
-   git add .
-   git commit -m "Add documentation"
-   git push origin main
-   ```
-
-3. **API Key**:
-   - Change `API_KEY` in `mcp_server.py` before pushing
-   - Or use environment variable
-
-## Security Notes
-
-- API key is hardcoded (`m1macmini`) — change before production
-- No rate limiting implemented
-- No request logging (add if needed)
-- Logs go to `logs/*.log` (gitignored)
+- Monitor via `/health` endpoint
+- Reduce batch_size in `rag_server.py` if needed

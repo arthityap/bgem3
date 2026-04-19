@@ -25,9 +25,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-PASS  = "\033[32m OK  \033[0m"
-FAIL  = "\033[31m FAIL\033[0m"
-WARN  = "\033[33m WARN\033[0m"
+PASS = "\033[32m OK  \033[0m"
+FAIL = "\033[31m FAIL\033[0m"
+WARN = "\033[33m WARN\033[0m"
 
 failures = 0
 
@@ -45,25 +45,25 @@ def check(label: str, ok: bool, msg: str = "", warn: bool = False) -> None:
 
 print("\n=== BGE-M3 Preflight Check ===\n")
 
-# 1. Python version
+# 1. Python version (must be exactly 3.11)
 pv = sys.version_info
 check(
-    f"Python >= 3.11  (found {pv.major}.{pv.minor}.{pv.micro})",
-    pv >= (3, 11),
-    "upgrade Python to 3.11+",
+    f"Python == 3.11.x  (found {pv.major}.{pv.minor}.{pv.micro})",
+    pv >= (3, 11) and pv < (3, 12),
+    "requires Python 3.11 (set .python-version to 3.11)",
 )
 
 # 2. Required packages
 REQUIRED_PACKAGES = [
-    ("torch",        "torch"),
+    ("torch", "torch"),
     ("FlagEmbedding", "FlagEmbedding"),
-    ("fastapi",      "fastapi"),
-    ("fastmcp",      "fastmcp"),
-    ("anyio",        "anyio"),
-    ("psutil",       "psutil"),
-    ("httpx",        "httpx"),
-    ("uvicorn",      "uvicorn"),
-    ("dotenv",       "python-dotenv"),
+    ("fastapi", "fastapi"),
+    ("fastmcp", "fastmcp"),
+    ("anyio", "anyio"),
+    ("psutil", "psutil"),
+    ("httpx", "httpx"),
+    ("uvicorn", "uvicorn"),
+    ("dotenv", "python-dotenv"),
 ]
 for mod, pkg in REQUIRED_PACKAGES:
     try:
@@ -75,8 +75,14 @@ for mod, pkg in REQUIRED_PACKAGES:
 # 3. MPS available
 try:
     import torch
+
     mps_ok = torch.backends.mps.is_available()
-    check("MPS (Apple Silicon GPU) available", mps_ok, "model will fall back to CPU (slow)", warn=not mps_ok)
+    check(
+        "MPS (Apple Silicon GPU) available",
+        mps_ok,
+        "model will fall back to CPU (slow)",
+        warn=not mps_ok,
+    )
 except Exception as e:
     check("MPS check", False, str(e))
 
@@ -87,10 +93,15 @@ api_key = os.getenv("EMBEDDING_API_KEY", "")
 if api_key:
     check(f"EMBEDDING_API_KEY set (value: {api_key})", True)
 else:
-    check("EMBEDDING_API_KEY set", False, "set EMBEDDING_API_KEY in .env — auth will be disabled without it", warn=True)
+    check(
+        "EMBEDDING_API_KEY set",
+        False,
+        "set EMBEDDING_API_KEY in .env — auth will be disabled without it",
+        warn=True,
+    )
 
 # 5. BGE-M3 model weights cached
-HF_HOME    = os.getenv("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+HF_HOME = os.getenv("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
 model_path = os.path.join(HF_HOME, "hub", "models--BAAI--bge-m3")
 check(
     f"BGE-M3 weights cached ({model_path})",
@@ -118,5 +129,7 @@ if failures == 0:
     print("  uv run uvicorn rag_server:app --host 0.0.0.0 --port 8000")
     print("  uv run python mcp_server.py")
 else:
-    print(f"\033[31m{failures} check(s) failed. Fix above issues before starting.\033[0m")
+    print(
+        f"\033[31m{failures} check(s) failed. Fix above issues before starting.\033[0m"
+    )
     sys.exit(1)
